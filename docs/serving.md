@@ -181,7 +181,10 @@ both OpenAI spellings are present they must carry the same boolean value. Unknow
 
 Streaming begins with an assistant-role chunk, sends separate reasoning and content deltas, then a
 finish-reason chunk and `[DONE]`. When `stream_options.include_usage` is true, a final empty
-`choices` chunk contains completed usage.
+`choices` chunk contains completed usage. Non-streaming usage and this final usage chunk expose
+the reused prefix as `prompt_tokens_details.cached_tokens`; `prompt_tokens` remains the complete
+rendered prompt size, including cached tokens. The llama.cpp-compatible `timings.cache_n` alias is
+also retained for existing metric consumers.
 
 ### Multimodal request
 
@@ -459,6 +462,12 @@ endpoints; the registered effort-capable template exposes `low`, `medium`, and `
 an effort with `thinking.type: "disabled"` is rejected as contradictory.
 
 Anthropic's `model` field is treated as a response label and does not select the loaded artifact.
+Messages usage follows Anthropic prompt-cache accounting: `input_tokens` is the uncached suffix,
+`cache_read_input_tokens` is the exact Engine-reused prefix, and
+`cache_creation_input_tokens` is `0` because NInfer does not charge or model an Anthropic cache
+write. Their sum is the complete rendered prompt size. Non-streaming responses carry these fields
+directly. A stream initializes them in `message_start` and publishes the final values in
+`message_delta`; current Anthropic SDKs merge the terminal values into the completed Message.
 
 `POST /v1/messages/count_tokens` uses the artifact's tokenizer, chat template, and media expansion
 without running GPU generation:

@@ -514,7 +514,8 @@ int test_stop_reason_mapping() {
 
 int test_response_serialization() {
     int failures = 0;
-    const CompletionUsage usage{7, 3};
+    CompletionUsage usage{7, 3};
+    usage.cache_hit_tokens = 5;
     const std::vector<ToolCall> tools = {ToolCall{"toolu_9", "get_weather", R"({"city":"Paris"})"}};
 
     const Json resp = Json::parse(make_messages_response(
@@ -525,7 +526,11 @@ int test_response_serialization() {
     failures += check(resp.at("model") == "claude-x", "model echoed");
     failures += check(resp.at("stop_reason") == "tool_use", "stop_reason");
     failures += check(resp.at("stop_sequence").is_null(), "stop_sequence null");
-    failures += check(resp.at("usage").at("input_tokens") == 7, "input_tokens");
+    failures += check(resp.at("usage").at("input_tokens") == 2, "uncached input_tokens");
+    failures += check(resp.at("usage").at("cache_creation_input_tokens") == 0,
+                      "cache creation tokens");
+    failures += check(resp.at("usage").at("cache_read_input_tokens") == 5,
+                      "cache read input tokens");
     failures += check(resp.at("usage").at("output_tokens") == 3, "output_tokens");
     const Json& content = resp.at("content");
     failures += check(content.size() == 3, "thinking + text + tool_use blocks");
@@ -560,6 +565,9 @@ int test_streaming_events() {
     failures += check(start.at("message").at("model") == "claude-x", "message_start model");
     failures += check(start.at("message").at("usage").at("input_tokens") == 11,
                       "message_start input_tokens");
+    failures += check(start.at("message").at("usage").at("cache_creation_input_tokens") == 0 &&
+                          start.at("message").at("usage").at("cache_read_input_tokens") == 0,
+                      "message_start initializes cache usage");
     failures += check(start.at("message").at("content").is_array() &&
                           start.at("message").at("content").empty(),
                       "message_start empty content");
@@ -602,12 +610,17 @@ int test_streaming_events() {
     const Json stop = parse_sse(make_content_block_stop(2), &type);
     failures += check(type == "content_block_stop" && stop.at("index") == 2, "content_block_stop");
 
-    const Json mdelta = parse_sse(make_message_delta("tool_use", 5), &type);
+    CompletionUsage final_usage{13, 5};
+    final_usage.cache_hit_tokens = 8;
+    const Json mdelta = parse_sse(make_message_delta("tool_use", final_usage), &type);
     failures +=
         check(type == "message_delta" && mdelta.at("delta").at("stop_reason") == "tool_use" &&
                   mdelta.at("delta").at("stop_sequence").is_null() &&
+                  mdelta.at("usage").at("input_tokens") == 5 &&
+                  mdelta.at("usage").at("cache_creation_input_tokens") == 0 &&
+                  mdelta.at("usage").at("cache_read_input_tokens") == 8 &&
                   mdelta.at("usage").at("output_tokens") == 5,
-              "message_delta stop_reason + usage");
+              "message_delta stop_reason + final cache usage");
 
     const Json mstop = parse_sse(make_message_stop(), &type);
     failures += check(type == "message_stop" && mstop.at("type") == "message_stop", "message_stop");

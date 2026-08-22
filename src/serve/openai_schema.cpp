@@ -1,5 +1,6 @@
 #include "serve/openai_schema.h"
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <chrono>
@@ -471,6 +472,15 @@ void add_slot_identity(Json& payload, const CompletionUsage& usage) {
     if (!usage.session_digest.empty()) { payload["session_digest"] = usage.session_digest; }
 }
 
+Json openai_usage(const CompletionUsage& usage) {
+    const std::int64_t cached =
+        std::clamp<std::int64_t>(usage.cache_hit_tokens, 0, usage.prompt_tokens);
+    return Json{{"prompt_tokens", usage.prompt_tokens},
+                {"prompt_tokens_details", Json{{"cached_tokens", cached}}},
+                {"completion_tokens", usage.completion_tokens},
+                {"total_tokens", usage.prompt_tokens + usage.completion_tokens}};
+}
+
 void add_timings(Json& payload, const CompletionUsage& usage) {
     if (!usage.has_timings) { return; }
     Json timings = {
@@ -622,9 +632,7 @@ std::string make_chat_completion_response(const std::string& id, const std::stri
         {"choices",
          Json::array({Json{
              {"index", 0}, {"message", std::move(message)}, {"finish_reason", finish_reason}}})},
-        {"usage", Json{{"prompt_tokens", usage.prompt_tokens},
-                       {"completion_tokens", usage.completion_tokens},
-                       {"total_tokens", usage.prompt_tokens + usage.completion_tokens}}}};
+        {"usage", openai_usage(usage)}};
     add_timings(payload, usage);
     add_slot_identity(payload, usage);
     return payload.dump();
@@ -647,9 +655,7 @@ std::string make_chat_completion_tool_response(const std::string& id, const std:
         {"choices",
          Json::array({Json{
              {"index", 0}, {"message", std::move(message)}, {"finish_reason", "tool_calls"}}})},
-        {"usage", Json{{"prompt_tokens", usage.prompt_tokens},
-                       {"completion_tokens", usage.completion_tokens},
-                       {"total_tokens", usage.prompt_tokens + usage.completion_tokens}}}};
+        {"usage", openai_usage(usage)}};
     add_timings(payload, usage);
     add_slot_identity(payload, usage);
     return payload.dump();
@@ -715,9 +721,7 @@ std::string make_chat_chunk_usage(const std::string& id, const std::string& mode
                                   std::int64_t created, const CompletionUsage& usage) {
     Json payload       = base_chunk(id, model, created);
     payload["choices"] = Json::array();
-    payload["usage"]   = Json{{"prompt_tokens", usage.prompt_tokens},
-                              {"completion_tokens", usage.completion_tokens},
-                              {"total_tokens", usage.prompt_tokens + usage.completion_tokens}};
+    payload["usage"]   = openai_usage(usage);
     add_timings(payload, usage);
     add_slot_identity(payload, usage);
     return sse_event(payload);

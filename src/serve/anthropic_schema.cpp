@@ -1,5 +1,6 @@
 #include "serve/anthropic_schema.h"
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <cstdint>
@@ -469,6 +470,16 @@ std::string sse(const char* type, const Json& payload) {
     return std::string("event: ") + type + "\ndata: " + payload.dump() + "\n\n";
 }
 
+Json messages_usage(const CompletionUsage& usage, bool include_output_tokens) {
+    const std::int64_t cached =
+        std::clamp<std::int64_t>(usage.cache_hit_tokens, 0, usage.prompt_tokens);
+    Json result = {{"input_tokens", usage.prompt_tokens - cached},
+                   {"cache_creation_input_tokens", 0},
+                   {"cache_read_input_tokens", cached}};
+    if (include_output_tokens) { result["output_tokens"] = usage.completion_tokens; }
+    return result;
+}
+
 } // namespace
 
 GenerationRequest parse_messages_request(const Json& body, const RequestLimits& limits) {
@@ -560,12 +571,12 @@ std::string make_messages_response(const std::string& id, const std::string& mod
                           {"content", std::move(blocks)},
                           {"stop_reason", stop_reason},
                           {"stop_sequence", nullptr},
-                          {"usage", Json{{"input_tokens", usage.prompt_tokens},
-                                         {"output_tokens", usage.completion_tokens}}}};
+                          {"usage", messages_usage(usage, true)}};
     return payload.dump();
 }
 
 std::string make_message_start(const std::string& id, const std::string& model, int input_tokens) {
+    const CompletionUsage initial_usage{input_tokens, 0};
     const Json message = {{"id", id},
                           {"type", "message"},
                           {"role", "assistant"},
@@ -573,7 +584,7 @@ std::string make_message_start(const std::string& id, const std::string& model, 
                           {"content", Json::array()},
                           {"stop_reason", nullptr},
                           {"stop_sequence", nullptr},
-                          {"usage", Json{{"input_tokens", input_tokens}, {"output_tokens", 0}}}};
+                          {"usage", messages_usage(initial_usage, true)}};
     return sse("message_start", Json{{"type", "message_start"}, {"message", message}});
 }
 
@@ -625,11 +636,11 @@ std::string make_content_block_stop(int index) {
     return sse("content_block_stop", Json{{"type", "content_block_stop"}, {"index", index}});
 }
 
-std::string make_message_delta(const char* stop_reason, int output_tokens) {
+std::string make_message_delta(const char* stop_reason, const CompletionUsage& usage) {
     return sse("message_delta",
                Json{{"type", "message_delta"},
                     {"delta", Json{{"stop_reason", stop_reason}, {"stop_sequence", nullptr}}},
-                    {"usage", Json{{"output_tokens", output_tokens}}}});
+                    {"usage", messages_usage(usage, true)}});
 }
 
 std::string make_message_stop() { return sse("message_stop", Json{{"type", "message_stop"}}); }

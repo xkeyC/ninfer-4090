@@ -757,7 +757,7 @@ void HttpServer::handle_messages(const httplib::Request& req, httplib::Response&
                 return req.is_connection_alive && !req.is_connection_alive();
             });
             log_request_done(log_context, outcome);
-            const CompletionUsage usage{outcome.prompt_tokens, outcome.completion_tokens};
+            const CompletionUsage usage = usage_with_timings(outcome);
             const char* stop_reason =
                 messages_stop_reason(outcome.finish_reason, !outcome.tool_calls.empty());
             set_owned_content(res,
@@ -872,8 +872,9 @@ void HttpServer::handle_messages(const httplib::Request& req, httplib::Response&
 
                 const char* stop_reason =
                     messages_stop_reason(outcome.finish_reason, !outcome.tool_calls.empty());
+                const CompletionUsage usage = usage_with_timings(outcome);
                 write_stream_item(sink, *stream,
-                                  make_message_delta(stop_reason, outcome.completion_tokens));
+                                  make_message_delta(stop_reason, usage));
                 write_stream_item(sink, *stream, make_message_stop());
                 sink.done();
                 return true;
