@@ -1,4 +1,5 @@
 #include "core/device.h"
+#include "core/host_transfer.h"
 #include "core/linear_attention_state.h"
 
 #include <cuda_runtime.h>
@@ -171,6 +172,22 @@ int main() {
     failures += expect_device_byte(slotted.recurrent_slot(0, 2), 0x4d, "copied recurrent slot");
     failures += expect_device_byte(slotted.conv_slot(1, 2), 0x3c, "copied conv layer1");
     failures += expect_device_byte(slotted.recurrent_slot(1, 2), 0x2d, "copied recurrent layer1");
+
+    const std::size_t conv_slot_bytes = slotted.conv_slot(0, 1).bytes() * slotted.layer_count();
+    const std::size_t recurrent_slot_bytes =
+        slotted.recurrent_slot(0, 1).bytes() * slotted.layer_count();
+    std::vector<std::uint8_t> conv_image(conv_slot_bytes);
+    std::vector<std::uint8_t> recurrent_image(recurrent_slot_bytes);
+    ninfer::HostTransferStager transfer(ctx.stream, 512);
+    slotted.copy_slot_to_host(1, conv_image.data(), recurrent_image.data(), transfer);
+    transfer.finish();
+    slotted.zero_slot(0, ctx.stream);
+    slotted.copy_slot_from_host(0, conv_image.data(), recurrent_image.data(), transfer);
+    transfer.finish();
+    failures += expect_device_byte(slotted.conv_slot(0, 0), 0x6b, "staged conv layer0");
+    failures += expect_device_byte(slotted.recurrent_slot(0, 0), 0x4d, "staged recurrent layer0");
+    failures += expect_device_byte(slotted.conv_slot(1, 0), 0x3c, "staged conv layer1");
+    failures += expect_device_byte(slotted.recurrent_slot(1, 0), 0x2d, "staged recurrent layer1");
 
     slotted.zero_slot(0, ctx.stream);
     ctx.synchronize();

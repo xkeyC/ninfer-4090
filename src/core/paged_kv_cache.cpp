@@ -1,6 +1,7 @@
 #include "core/paged_kv_cache.h"
 
 #include "core/device.h"
+#include "core/host_transfer.h"
 
 #include <algorithm>
 #include <limits>
@@ -220,7 +221,7 @@ std::size_t PagedKVPool::page_payload_bytes() const noexcept {
 template <bool ToHost>
 void copy_pages_between_host(const PagedKVPoolSpec& spec, const std::vector<Tensor>& planes,
                              std::span<const std::int32_t> page_ids, void* host,
-                             cudaStream_t stream) {
+                             cudaStream_t stream, HostTransferStager* transfer) {
     if (page_ids.empty()) { return; }
     for (const std::int32_t page : page_ids) {
         if (page < 0 || page >= static_cast<std::int32_t>(spec.page_group_count)) {
@@ -243,9 +244,19 @@ void copy_pages_between_host(const PagedKVPoolSpec& spec, const std::vector<Tens
                                                      static_cast<std::int64_t>(page_size);
                 unsigned char* host_run = cursor + begin * page_size;
                 if constexpr (ToHost) {
-                    CUDA_CHECK(cudaMemcpyAsync(host_run, device, run * page_size, kind, stream));
+                    if (transfer != nullptr) {
+                        transfer->device_to_host(host_run, device, run * page_size);
+                    } else {
+                        CUDA_CHECK(
+                            cudaMemcpyAsync(host_run, device, run * page_size, kind, stream));
+                    }
                 } else {
-                    CUDA_CHECK(cudaMemcpyAsync(device, host_run, run * page_size, kind, stream));
+                    if (transfer != nullptr) {
+                        transfer->host_to_device(device, host_run, run * page_size);
+                    } else {
+                        CUDA_CHECK(
+                            cudaMemcpyAsync(device, host_run, run * page_size, kind, stream));
+                    }
                 }
                 begin = end;
             }
@@ -253,21 +264,35 @@ void copy_pages_between_host(const PagedKVPoolSpec& spec, const std::vector<Tens
             // HeadMajor keeps one page's payload strided across the head dimension; copy each
             // page as a pitched block so the host image stays page-contiguous either way.
             for (std::size_t index = 0; index < page_ids.size(); ++index) {
-                unsigned char* device = base + static_cast<std::int64_t>(page_ids[index]) *
-                                                   static_cast<std::int64_t>(plane.nb[2]);
+                unsigned char* device    = base + static_cast<std::int64_t>(page_ids[index]) *
+                                                      static_cast<std::int64_t>(plane.nb[2]);
                 unsigned char* host_page = cursor + index * page_size;
                 if constexpr (ToHost) {
-                    CUDA_CHECK(cudaMemcpy2DAsync(host_page, static_cast<std::size_t>(plane.nb[2]),
-                                                 device, static_cast<std::size_t>(plane.nb[3]),
-                                                 static_cast<std::size_t>(plane.nb[2]),
-                                                 static_cast<std::size_t>(plane.ne[3]), kind,
-                                                 stream));
+                    if (transfer != nullptr) {
+                        transfer->device_to_host_2d(host_page, device,
+                                                    static_cast<std::size_t>(plane.nb[3]),
+                                                    static_cast<std::size_t>(plane.nb[2]),
+                                                    static_cast<std::size_t>(plane.ne[3]));
+                    } else {
+                        CUDA_CHECK(
+                            cudaMemcpy2DAsync(host_page, static_cast<std::size_t>(plane.nb[2]),
+                                              device, static_cast<std::size_t>(plane.nb[3]),
+                                              static_cast<std::size_t>(plane.nb[2]),
+                                              static_cast<std::size_t>(plane.ne[3]), kind, stream));
+                    }
                 } else {
-                    CUDA_CHECK(cudaMemcpy2DAsync(device, static_cast<std::size_t>(plane.nb[3]),
-                                                 host_page, static_cast<std::size_t>(plane.nb[2]),
-                                                 static_cast<std::size_t>(plane.nb[2]),
-                                                 static_cast<std::size_t>(plane.ne[3]), kind,
-                                                 stream));
+                    if (transfer != nullptr) {
+                        transfer->host_to_device_2d(device, static_cast<std::size_t>(plane.nb[3]),
+                                                    host_page,
+                                                    static_cast<std::size_t>(plane.nb[2]),
+                                                    static_cast<std::size_t>(plane.ne[3]));
+                    } else {
+                        CUDA_CHECK(
+                            cudaMemcpy2DAsync(device, static_cast<std::size_t>(plane.nb[3]),
+                                              host_page, static_cast<std::size_t>(plane.nb[2]),
+                                              static_cast<std::size_t>(plane.nb[2]),
+                                              static_cast<std::size_t>(plane.ne[3]), kind, stream));
+                    }
                 }
             }
         }
@@ -277,12 +302,24 @@ void copy_pages_between_host(const PagedKVPoolSpec& spec, const std::vector<Tens
 
 void PagedKVPool::copy_pages_to_host(std::span<const std::int32_t> page_ids, void* host,
                                      cudaStream_t stream) const {
-    copy_pages_between_host<true>(spec_, planes_, page_ids, host, stream);
+    copy_pages_between_host<true>(spec_, planes_, page_ids, host, stream, nullptr);
 }
 
 void PagedKVPool::copy_pages_from_host(std::span<const std::int32_t> page_ids, const void* host,
                                        cudaStream_t stream) {
-    copy_pages_between_host<false>(spec_, planes_, page_ids, const_cast<void*>(host), stream);
+    copy_pages_between_host<false>(spec_, planes_, page_ids, const_cast<void*>(host), stream,
+                                   nullptr);
+}
+
+void PagedKVPool::copy_pages_to_host(std::span<const std::int32_t> page_ids, void* host,
+                                     HostTransferStager& transfer) const {
+    copy_pages_between_host<true>(spec_, planes_, page_ids, host, nullptr, &transfer);
+}
+
+void PagedKVPool::copy_pages_from_host(std::span<const std::int32_t> page_ids, const void* host,
+                                       HostTransferStager& transfer) {
+    copy_pages_between_host<false>(spec_, planes_, page_ids, const_cast<void*>(host), nullptr,
+                                   &transfer);
 }
 
 std::vector<std::int32_t> PagedKVPool::take_pages(std::uint32_t count,

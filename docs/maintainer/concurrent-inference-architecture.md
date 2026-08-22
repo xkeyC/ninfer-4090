@@ -465,6 +465,35 @@ admission 的完整 entitlement；不为 `H` pin matching lane/checkpoint。Incu
 可以把其完整 active entitlement 视为可释放。不可驱逐的 engine-fixed occupancy 属于 `K` 之外的 baseline，
 不能伪装成 donor release。
 
+配置 host prefix cache 时，device eviction 可以先把 idle retained continuation 捕获到有界 host block
+store。Logical manifest 引用 metadata、GDN state/checkpoint 和逐 64-token KV page-group immutable
+blocks；相同块跨分支只保存一次。每个 block 记录 recall count/last-recall，容量不足时以
+`last_recall + 5min * floor(log2(1 + recall_count))` 选择最冷的 unpinned block，再原子移除所有依赖
+它的 unpinned manifests，不能留下缺中间块的 image。
+Host entry 不占 admission resources，不改变 active-priority eviction 或 completion guarantee；后续 prepared
+prompt 只有在 target 对完整 prefix identity 给出非零 reusable frontier 时才能 claim entry。Materialize
+不是 exclusive ownership transfer：manifest 在 lane 驻留期间保持 pinned/matchable；再次 spill 时以它为
+base，仅 D2H 新增/变化的 page/checkpoint，再把新 manifest 插回共享 block store。
+恢复仍须在 boundary 取得完整 request entitlement，不能抢占 active request，也不能让 host cache 绕过
+protected-head accounting。
+
+完整 session image 属于 pageable、byte-bounded host cache；它不随 cache budget 变成 pinned memory。
+Device transfer 通过 Program-owned 的两块固定 64 MiB pinned staging buffers 流水执行。PageMajor KV 的
+连续 physical runs 以 bounded chunks 搬运，GDN slot 用 layer-strided 2D transfer 聚合，完成一次 capture
+或 restore 后才允许释放或重新使用相关 device state。Runtime 分别累计 capture/restore bytes、wall time
+和 failures，使 queue、spill、restore 与 suffix prefill 成本可独立归因。
+
+Victim preservation 不只发生在 physical eviction。若 lane plan 选择 `RestoreTurnCheckpoint`，当前
+continuation 会在同一 lane 内被截断；Engine 必须在调用 target start 前先把截断前的完整 continuation
+送入同一个 host victim cache。这样两条共享早期 checkpoint、之后分叉的会话可以交替 claim 各自的深层
+image，而不会每次都从共同 checkpoint 重算。`AppendAtFrontier` 不破坏已有 continuation，因此不捕获。
+
+Host cache 开启时，scheduler 在 ingress FIFO 上增加有界 KV affinity：若同时存在 resident-prefix match
+和更早的 cold competitor，前者最多连续借用 `kv_affinity_burst` 次 admission；达到预算后必须选择最早
+competitor 并开始新的轮转。该计数只在真实 contention 时推进，不把“5 次”实现为硬等待。若 competitor
+已排队但上一轮 resident owner 刚完成，worker 可以释放 execution mutex，在
+`kv_affinity_grace_ms` 内等待其 continuation 入队；默认 burst/grace 为 5/1500 ms。
+
 ### 5.5 Service projection and bounded temporal borrowing
 
 总 entitlement 决定资源可行性，但不能单独代表 residence time。Scheduler 使用一份有限、单调、以统一

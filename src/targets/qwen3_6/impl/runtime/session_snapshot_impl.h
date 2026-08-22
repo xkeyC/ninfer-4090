@@ -30,19 +30,21 @@
 namespace ninfer::targets::qwen3_6::detail::NINFER_QWEN36_RUNTIME_NS {
 namespace {
 
-constexpr char kSessionSnapshotMagic[8] = {'N', 'I', 'N', 'F', 'S', 'E', 'S', '1'};
+constexpr std::size_t kSessionTransferBufferBytes = 64ULL << 20;
+
+constexpr char kSessionSnapshotMagic[8]         = {'N', 'I', 'N', 'F', 'S', 'E', 'S', '1'};
 constexpr std::uint32_t kSessionSnapshotVersion = 1;
 // Version 2 appends the host turn-checkpoint ring after the KV payload. A snapshot with an
 // empty ring is still written as version 1 so binaries without ring support keep reading it.
-constexpr std::uint32_t kSessionSnapshotVersionRing = 2;
+constexpr std::uint32_t kSessionSnapshotVersionRing    = 2;
 constexpr std::uint32_t kSessionSnapshotMaxRingEntries = 64;
 
-constexpr std::uint32_t kKvFlagPackedV    = 1U << 0;
-constexpr std::uint32_t kKvFlagRotateK    = 1U << 1;
-constexpr std::uint32_t kKvFlagRotateV    = 1U << 2;
-constexpr std::uint32_t kKvFlagPackedK    = 1U << 3;
-constexpr std::uint32_t kKvFlagE8Lattice  = 1U << 4;
-constexpr std::uint32_t kKvFlagE8Root     = 1U << 5;
+constexpr std::uint32_t kKvFlagPackedV   = 1U << 0;
+constexpr std::uint32_t kKvFlagRotateK   = 1U << 1;
+constexpr std::uint32_t kKvFlagRotateV   = 1U << 2;
+constexpr std::uint32_t kKvFlagPackedK   = 1U << 3;
+constexpr std::uint32_t kKvFlagE8Lattice = 1U << 4;
+constexpr std::uint32_t kKvFlagE8Root    = 1U << 5;
 
 class SnapshotWriter {
 public:
@@ -160,7 +162,7 @@ std::vector<VisionItem> read_vision_items(SnapshotReader& reader, std::size_t to
         item.patch_begin   = static_cast<std::size_t>(reader.pod<std::uint64_t>());
         item.patch_count   = static_cast<std::size_t>(reader.pod<std::uint64_t>());
         reader.bytes(item.content_digest.data(), item.content_digest.size());
-        item.timestamps = read_vector<double>(reader, tokens, "vision timestamp");
+        item.timestamps           = read_vector<double>(reader, tokens, "vision timestamp");
         const std::uint32_t spans = reader.pod<std::uint32_t>();
         if (spans > tokens) {
             throw std::invalid_argument("session snapshot vision span count is out of range");
@@ -279,7 +281,98 @@ std::string ledger_digest(const std::vector<TokenId>& ledger) {
     return ledger_prefix_digest(std::span<const TokenId>(ledger.data(), ledger.size()));
 }
 
+struct SnapshotPayloadView {
+    SnapshotConfig config;
+    SnapshotSession session;
+    std::vector<TokenId> ledger;
+    std::vector<std::uint8_t> token_types;
+    std::array<std::vector<std::int32_t>, 3> positions;
+    std::vector<VisionItem> vision_items;
+    const std::uint8_t* checkpoint_hidden = nullptr;
+    const std::uint8_t* checkpoint_conv = nullptr;
+    const std::uint8_t* checkpoint_recurrent = nullptr;
+    const std::uint8_t* text = nullptr;
+    const std::uint8_t* backend = nullptr;
+};
+
+bool same_snapshot_config(const SnapshotConfig& left, const SnapshotConfig& right) noexcept {
+    return left.kv_dtype == right.kv_dtype && left.kv_quant_group == right.kv_quant_group &&
+           left.kv_flags == right.kv_flags &&
+           left.speculative_backend == right.speculative_backend &&
+           left.draft_window == right.draft_window && left.page_size == right.page_size &&
+           left.gdn_layers == right.gdn_layers &&
+           left.conv_slot_bytes == right.conv_slot_bytes &&
+           left.recurrent_slot_bytes == right.recurrent_slot_bytes &&
+           left.tail_hidden_bytes == right.tail_hidden_bytes &&
+           left.text_plane_count == right.text_plane_count &&
+           left.text_page_bytes == right.text_page_bytes &&
+           left.backend_plane_count == right.backend_plane_count &&
+           left.backend_page_bytes == right.backend_page_bytes;
+}
+
+std::optional<SnapshotPayloadView>
+read_snapshot_payload_view(std::span<const std::uint8_t> bytes, std::string_view model_binding,
+                           const SnapshotConfig& expected) noexcept {
+    if (bytes.empty()) { return std::nullopt; }
+    try {
+        SnapshotReader reader(bytes);
+        char magic[sizeof(kSessionSnapshotMagic)] = {};
+        reader.bytes(magic, sizeof(magic));
+        if (std::memcmp(magic, kSessionSnapshotMagic, sizeof(magic)) != 0) {
+            return std::nullopt;
+        }
+        const std::uint32_t version = reader.pod<std::uint32_t>();
+        if (version != kSessionSnapshotVersion && version != kSessionSnapshotVersionRing) {
+            return std::nullopt;
+        }
+        const std::uint32_t binding_bytes = reader.pod<std::uint32_t>();
+        if (binding_bytes > 4096) { return std::nullopt; }
+        std::string binding(binding_bytes, '\0');
+        reader.bytes(binding.data(), binding.size());
+        if (binding != model_binding) { return std::nullopt; }
+
+        SnapshotPayloadView view;
+        view.config = read_config(reader);
+        if (!same_snapshot_config(view.config, expected)) { return std::nullopt; }
+        view.session = read_session(reader);
+        view.ledger = read_vector<TokenId>(reader, view.session.tokens, "ledger");
+        view.token_types =
+            read_vector<std::uint8_t>(reader, view.session.tokens, "token type");
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            view.positions[axis] =
+                read_vector<std::int32_t>(reader, view.session.tokens, "position");
+        }
+        view.vision_items = read_vision_items(reader, view.session.tokens);
+
+        if (view.session.tail_hidden_valid != 0) {
+            (void)reader.payload(view.config.tail_hidden_bytes);
+        }
+        (void)reader.payload(view.config.conv_slot_bytes * view.config.gdn_layers);
+        (void)reader.payload(view.config.recurrent_slot_bytes * view.config.gdn_layers);
+        if (view.session.turn_checkpoint_valid != 0) {
+            view.checkpoint_hidden = reader.payload(view.config.tail_hidden_bytes);
+            view.checkpoint_conv =
+                reader.payload(view.config.conv_slot_bytes * view.config.gdn_layers);
+            view.checkpoint_recurrent =
+                reader.payload(view.config.recurrent_slot_bytes * view.config.gdn_layers);
+        }
+        view.text = reader.payload(view.config.text_page_bytes * view.session.text_pages);
+        if (view.session.backend_pages != 0) {
+            view.backend =
+                reader.payload(view.config.backend_page_bytes * view.session.backend_pages);
+        }
+        return view;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 } // namespace
+
+HostTransferStager& ProgramImplCore::session_transfer_stager() {
+    if (!session_transfer) { session_transfer.emplace(device.stream, kSessionTransferBufferBytes); }
+    return *session_transfer;
+}
 
 std::uint32_t ProgramImplCore::retained_lane_depth(std::uint32_t lane) const noexcept {
     if (lane >= max_concurrency || !sequences[lane].retained) { return 0; }
@@ -291,8 +384,7 @@ std::string ProgramImplCore::retained_lane_digest(std::uint32_t lane) const {
     return ledger_digest(sequences[lane].ledger);
 }
 
-std::vector<SlotCheckpoint>
-ProgramImplCore::retained_lane_checkpoints(std::uint32_t lane) const {
+std::vector<SlotCheckpoint> ProgramImplCore::retained_lane_checkpoints(std::uint32_t lane) const {
     if (lane >= max_concurrency || !sequences[lane].retained) { return {}; }
     const SequenceState& sequence = sequences[lane];
     std::vector<SlotCheckpoint> out;
@@ -310,7 +402,8 @@ ProgramImplCore::retained_lane_checkpoints(std::uint32_t lane) const {
 }
 
 qwen3_6::RetainedSessionSnapshot
-ProgramImplCore::save_retained_lane(std::uint32_t lane, std::string_view model_binding) {
+ProgramImplCore::save_retained_lane(std::uint32_t lane, std::string_view model_binding,
+                                    std::span<const std::uint8_t> base_snapshot) {
     if (lane >= max_concurrency) { throw std::out_of_range("request lane is out of range"); }
     const RequestControl& request = requests[lane];
     SequenceState& sequence       = sequences[lane];
@@ -343,26 +436,25 @@ ProgramImplCore::save_retained_lane(std::uint32_t lane, std::string_view model_b
         throw std::invalid_argument("retained session is too shallow to snapshot");
     }
 
-    const PagedKVPool& text_pool = decoder->text_kv.pool();
-    const qwen3_6::PagedKVCache* backend = backend_kv_cache();
-    const std::span<const std::int32_t> text_pages = sequence.kv->text.page_ids();
-    const std::span<const std::int32_t> backend_pages =
-        backend != nullptr && sequence.kv->backend ? sequence.kv->backend->page_ids()
-                                                   : std::span<const std::int32_t>{};
+    const PagedKVPool& text_pool                      = decoder->text_kv.pool();
+    const qwen3_6::PagedKVCache* backend              = backend_kv_cache();
+    const std::span<const std::int32_t> text_pages    = sequence.kv->text.page_ids();
+    const std::span<const std::int32_t> backend_pages = backend != nullptr && sequence.kv->backend
+                                                            ? sequence.kv->backend->page_ids()
+                                                            : std::span<const std::int32_t>{};
 
     const LinearAttentionStatePool& states = decoder->linear_attention;
-    const std::int32_t current_slot    = LinearStateSlots::current_state_slot(lane, max_concurrency);
+    const std::int32_t current_slot = LinearStateSlots::current_state_slot(lane, max_concurrency);
     const std::int32_t checkpoint_slot =
         LinearStateSlots::turn_checkpoint_state_slot(lane, max_concurrency);
     const std::size_t conv_bytes      = states.conv_slot(0, current_slot).bytes();
     const std::size_t recurrent_bytes = states.recurrent_slot(0, current_slot).bytes();
 
     SnapshotConfig config;
-    config.kv_dtype            = static_cast<std::uint32_t>(kv_dtype);
-    config.kv_quant_group      = kv_quant_group;
-    config.kv_flags            = (kv_packed_v ? kKvFlagPackedV : 0U) |
-                      (kv_rotate_k ? kKvFlagRotateK : 0U) | (kv_rotate_v ? kKvFlagRotateV : 0U) |
-                      (kv_packed_k ? kKvFlagPackedK : 0U) |
+    config.kv_dtype       = static_cast<std::uint32_t>(kv_dtype);
+    config.kv_quant_group = kv_quant_group;
+    config.kv_flags = (kv_packed_v ? kKvFlagPackedV : 0U) | (kv_rotate_k ? kKvFlagRotateK : 0U) |
+                      (kv_rotate_v ? kKvFlagRotateV : 0U) | (kv_packed_k ? kKvFlagPackedK : 0U) |
                       (kv_e8_lattice ? kKvFlagE8Lattice : 0U) | (kv_e8_root ? kKvFlagE8Root : 0U);
     config.speculative_backend  = static_cast<std::uint32_t>(speculative_backend);
     config.draft_window         = draft_window;
@@ -407,8 +499,22 @@ ProgramImplCore::save_retained_lane(std::uint32_t lane, std::string_view model_b
     }
 
     qwen3_6::RetainedSessionSnapshot snapshot;
-    snapshot.tokens         = session.tokens;
-    snapshot.session_digest = ledger_digest(sequence.ledger);
+    snapshot.tokens                   = session.tokens;
+    snapshot.session_digest           = ledger_digest(sequence.ledger);
+    snapshot.execution_frontier       = sequence.execution_frontier;
+    snapshot.mtp_kv_valid             = sequence.mtp_kv_valid;
+    snapshot.turn_checkpoint_frontier = sequence.turn_checkpoint.frontier;
+    snapshot.tail_hidden_valid        = sequence.tail_hidden_valid;
+    snapshot.ledger                   = sequence.ledger;
+    snapshot.token_types              = sequence.prefix_identity.token_types();
+    for (std::size_t axis = 0; axis < snapshot.positions.size(); ++axis) {
+        snapshot.positions[axis] = sequence.prefix_identity.position_axis(axis);
+    }
+    snapshot.vision_items = sequence.prefix_identity.vision_items();
+    snapshot.checkpoint_frontiers.reserve(ring_entries.size());
+    for (const HostTurnCheckpoint& entry : ring_entries) {
+        snapshot.checkpoint_frontiers.push_back(entry.frontier);
+    }
     SnapshotWriter writer(snapshot.bytes);
     writer.bytes(kSessionSnapshotMagic, sizeof(kSessionSnapshotMagic));
     writer.pod(ring_entries.empty() ? kSessionSnapshotVersion : kSessionSnapshotVersionRing);
@@ -422,6 +528,7 @@ ProgramImplCore::save_retained_lane(std::uint32_t lane, std::string_view model_b
         write_vector(writer, sequence.prefix_identity.position_axis(axis));
     }
     write_vision_items(writer, sequence.prefix_identity.vision_items());
+    const std::size_t metadata_end = snapshot.bytes.size();
 
     // Size the device payload in one pass so the vector's storage is final before any
     // cudaMemcpyAsync records a destination pointer.
@@ -429,6 +536,7 @@ ProgramImplCore::save_retained_lane(std::uint32_t lane, std::string_view model_b
         std::size_t conv      = 0;
         std::size_t recurrent = 0;
     };
+
     const bool save_checkpoint = sequence.turn_checkpoint.valid;
     std::size_t tail_offset    = 0;
     if (sequence.tail_hidden_valid) {
@@ -440,14 +548,15 @@ ProgramImplCore::save_retained_lane(std::uint32_t lane, std::string_view model_b
     std::size_t checkpoint_hidden_offset = 0;
     GdnRegion checkpoint_region;
     if (save_checkpoint) {
-        checkpoint_hidden_offset  = writer.reserve_payload(config.tail_hidden_bytes);
-        checkpoint_region.conv    = writer.reserve_payload(conv_bytes * config.gdn_layers);
+        checkpoint_hidden_offset    = writer.reserve_payload(config.tail_hidden_bytes);
+        checkpoint_region.conv      = writer.reserve_payload(conv_bytes * config.gdn_layers);
         checkpoint_region.recurrent = writer.reserve_payload(recurrent_bytes * config.gdn_layers);
     }
     const std::size_t text_kv_offset =
         writer.reserve_payload(config.text_page_bytes * session.text_pages);
     const std::size_t backend_kv_offset =
         writer.reserve_payload(config.backend_page_bytes * session.backend_pages);
+    const std::size_t ring_offset = snapshot.bytes.size();
 
     // Ring entries are host data, so they are written inline during the sizing pass; they land
     // after the KV payload regions in the byte stream. Nothing may grow the vector once the
@@ -462,36 +571,181 @@ ProgramImplCore::save_retained_lane(std::uint32_t lane, std::string_view model_b
         }
     }
 
-    std::uint8_t* base = snapshot.bytes.data();
-    const auto copy_gdn_slot = [&](std::int32_t slot, const GdnRegion& region) {
-        for (std::uint32_t layer = 0; layer < config.gdn_layers; ++layer) {
-            const Tensor conv = states.conv_slot(layer, slot);
-            CUDA_CHECK(cudaMemcpyAsync(base + region.conv + layer * conv_bytes, conv.data,
-                                       conv_bytes, cudaMemcpyDeviceToHost, device.stream));
-            const Tensor recurrent = states.recurrent_slot(layer, slot);
-            CUDA_CHECK(cudaMemcpyAsync(base + region.recurrent + layer * recurrent_bytes,
-                                       recurrent.data, recurrent_bytes, cudaMemcpyDeviceToHost,
-                                       device.stream));
+    // Partition the durable stream into semantically stable cache blocks. Each paged-KV unit is
+    // exactly one 64-token page group. GDN and ring checkpoints remain independent blocks because
+    // they are cumulative state, not reconstructable from the attention pages.
+    snapshot.cache_block_sizes.push_back(metadata_end);
+    if (sequence.tail_hidden_valid) {
+        snapshot.cache_block_sizes.push_back(config.tail_hidden_bytes);
+    }
+    snapshot.cache_block_sizes.push_back(conv_bytes * config.gdn_layers);
+    snapshot.cache_block_sizes.push_back(recurrent_bytes * config.gdn_layers);
+    if (save_checkpoint) {
+        snapshot.cache_block_sizes.push_back(config.tail_hidden_bytes);
+        snapshot.cache_block_sizes.push_back(conv_bytes * config.gdn_layers);
+        snapshot.cache_block_sizes.push_back(recurrent_bytes * config.gdn_layers);
+    }
+    for (std::uint32_t page = 0; page < session.text_pages; ++page) {
+        snapshot.cache_block_sizes.push_back(config.text_page_bytes);
+    }
+    for (std::uint32_t page = 0; page < session.backend_pages; ++page) {
+        snapshot.cache_block_sizes.push_back(config.backend_page_bytes);
+    }
+    if (!ring_entries.empty()) {
+        snapshot.cache_block_sizes.push_back(sizeof(std::uint32_t));
+        for (const HostTurnCheckpoint& entry : ring_entries) {
+            snapshot.cache_block_sizes.push_back(sizeof(std::uint32_t) + entry.hidden.size() +
+                                                 entry.conv.size() + entry.recurrent.size());
         }
+    }
+    std::size_t framed_bytes = 0;
+    for (const std::size_t bytes : snapshot.cache_block_sizes) { framed_bytes += bytes; }
+    if (framed_bytes != snapshot.bytes.size() || ring_offset > snapshot.bytes.size()) {
+        throw std::logic_error("session snapshot cache block framing is inconsistent");
+    }
+
+    snapshot.cache_metadata_bytes = snapshot.session_digest.size() +
+                                    snapshot.checkpoint_frontiers.size() * sizeof(std::uint32_t) +
+                                    snapshot.ledger.size() * sizeof(TokenId) +
+                                    snapshot.token_types.size();
+    for (const auto& axis : snapshot.positions) {
+        snapshot.cache_metadata_bytes += axis.size() * sizeof(std::int32_t);
+    }
+    for (const VisionItem& item : snapshot.vision_items) {
+        snapshot.cache_metadata_bytes += sizeof(VisionItem) +
+                                         item.timestamps.size() * sizeof(double) +
+                                         item.token_spans.size() * sizeof(TokenSpan);
+    }
+
+    const auto base_view = read_snapshot_payload_view(base_snapshot, model_binding, config);
+    bool base_is_prefix = false;
+    if (base_view && base_view->session.tokens <= sequence.ledger.size() &&
+        base_view->ledger.size() == base_view->session.tokens &&
+        sequence.prefix_identity.matches(base_view->token_types, base_view->positions,
+                                         base_view->vision_items,
+                                         base_view->session.tokens)) {
+        base_is_prefix = std::equal(base_view->ledger.begin(), base_view->ledger.end(),
+                                    sequence.ledger.begin());
+    }
+    std::uint32_t shared_text_pages = 0;
+    std::uint32_t shared_backend_pages = 0;
+    if (base_is_prefix) {
+        shared_text_pages = std::min(
+            {base_view->session.text_pages, session.text_pages,
+             base_view->session.text_kv_valid / static_cast<std::uint32_t>(kPagedKVPageSize)});
+        shared_backend_pages = std::min(
+            {base_view->session.backend_pages, session.backend_pages,
+             base_view->session.mtp_kv_valid / static_cast<std::uint32_t>(kPagedKVPageSize)});
+    }
+    const bool reuse_checkpoint =
+        base_is_prefix && save_checkpoint && base_view->session.turn_checkpoint_valid != 0 &&
+        base_view->session.turn_checkpoint_frontier == session.turn_checkpoint_frontier &&
+        base_view->checkpoint_hidden != nullptr;
+
+    std::uint8_t* base           = snapshot.bytes.data();
+    HostTransferStager& transfer = session_transfer_stager();
+    const auto copy_gdn_slot     = [&](std::int32_t slot, const GdnRegion& region) {
+        states.copy_slot_to_host(slot, base + region.conv, base + region.recurrent, transfer);
     };
     if (sequence.tail_hidden_valid) {
-        CUDA_CHECK(cudaMemcpyAsync(base + tail_offset, sequence.tail_hidden.data,
-                                   config.tail_hidden_bytes, cudaMemcpyDeviceToHost,
-                                   device.stream));
+        transfer.device_to_host(base + tail_offset, sequence.tail_hidden.data,
+                                config.tail_hidden_bytes);
+        snapshot.device_transfer_bytes += config.tail_hidden_bytes;
     }
     copy_gdn_slot(current_slot, current_region);
+    snapshot.device_transfer_bytes +=
+        (conv_bytes + recurrent_bytes) * static_cast<std::size_t>(config.gdn_layers);
     if (save_checkpoint) {
-        CUDA_CHECK(cudaMemcpyAsync(base + checkpoint_hidden_offset,
-                                   sequence.turn_checkpoint_hidden.data, config.tail_hidden_bytes,
-                                   cudaMemcpyDeviceToHost, device.stream));
-        copy_gdn_slot(checkpoint_slot, checkpoint_region);
+        if (reuse_checkpoint) {
+            std::memcpy(base + checkpoint_hidden_offset, base_view->checkpoint_hidden,
+                        config.tail_hidden_bytes);
+            std::memcpy(base + checkpoint_region.conv, base_view->checkpoint_conv,
+                        conv_bytes * config.gdn_layers);
+            std::memcpy(base + checkpoint_region.recurrent, base_view->checkpoint_recurrent,
+                        recurrent_bytes * config.gdn_layers);
+        } else {
+            transfer.device_to_host(base + checkpoint_hidden_offset,
+                                    sequence.turn_checkpoint_hidden.data,
+                                    config.tail_hidden_bytes);
+            copy_gdn_slot(checkpoint_slot, checkpoint_region);
+            snapshot.device_transfer_bytes += config.tail_hidden_bytes +
+                                              (conv_bytes + recurrent_bytes) *
+                                                  static_cast<std::size_t>(config.gdn_layers);
+        }
     }
-    text_pool.copy_pages_to_host(text_pages, base + text_kv_offset, device.stream);
+    if (shared_text_pages != 0) {
+        std::memcpy(base + text_kv_offset, base_view->text,
+                    config.text_page_bytes * shared_text_pages);
+    }
+    if (shared_text_pages < text_pages.size()) {
+        text_pool.copy_pages_to_host(text_pages.subspan(shared_text_pages),
+                                     base + text_kv_offset +
+                                         config.text_page_bytes * shared_text_pages,
+                                     transfer);
+        snapshot.device_transfer_bytes +=
+            config.text_page_bytes * (text_pages.size() - shared_text_pages);
+    }
     if (!backend_pages.empty()) {
-        backend->pool().copy_pages_to_host(backend_pages, base + backend_kv_offset, device.stream);
+        if (shared_backend_pages != 0) {
+            std::memcpy(base + backend_kv_offset, base_view->backend,
+                        config.backend_page_bytes * shared_backend_pages);
+        }
+        if (shared_backend_pages < backend_pages.size()) {
+            backend->pool().copy_pages_to_host(
+                backend_pages.subspan(shared_backend_pages),
+                base + backend_kv_offset + config.backend_page_bytes * shared_backend_pages,
+                transfer);
+            snapshot.device_transfer_bytes +=
+                config.backend_page_bytes * (backend_pages.size() - shared_backend_pages);
+        }
     }
-    device.synchronize();
+    transfer.finish();
     return snapshot;
+}
+
+std::uint32_t
+ProgramImplCore::reusable_snapshot_prefix(const qwen3_6::RetainedSessionSnapshot& snapshot,
+                                          const PreparedPromptData& prompt,
+                                          bool allow_prefix_reuse) const {
+    if (!allow_prefix_reuse || !prompt.identity.reusable || snapshot.tokens == 0 ||
+        snapshot.ledger.size() != snapshot.tokens ||
+        snapshot.token_types.size() != snapshot.tokens) {
+        return 0;
+    }
+    for (const auto& axis : snapshot.positions) {
+        if (axis.size() != snapshot.tokens) { return 0; }
+    }
+    const auto matches = [&](std::uint32_t frontier) {
+        return frontier != 0 && frontier <= snapshot.tokens &&
+               qwen3_6::detail::prefix_matches(prompt, snapshot.ledger, snapshot.token_types,
+                                               snapshot.positions, snapshot.vision_items, frontier);
+    };
+
+    bool append_ready = snapshot.execution_frontier != 0;
+    if (speculative_backend == SpeculativeBackend::Mtp) {
+        append_ready = append_ready && snapshot.tail_hidden_valid &&
+                       snapshot.mtp_kv_valid + 1U >= snapshot.execution_frontier;
+    } else if (speculative_backend == SpeculativeBackend::DFlash) {
+        append_ready = false;
+    }
+    if (append_ready && matches(snapshot.execution_frontier)) {
+        return snapshot.execution_frontier;
+    }
+
+    const auto checkpoint_ready = [&](std::uint32_t frontier) {
+        return frontier < prompt.token_ids.size() &&
+               (speculative_backend != SpeculativeBackend::Mtp ||
+                snapshot.mtp_kv_valid + 1U >= frontier) &&
+               matches(frontier);
+    };
+    if (checkpoint_ready(snapshot.turn_checkpoint_frontier)) {
+        return snapshot.turn_checkpoint_frontier;
+    }
+    for (auto entry = snapshot.checkpoint_frontiers.rbegin();
+         entry != snapshot.checkpoint_frontiers.rend(); ++entry) {
+        if (checkpoint_ready(*entry)) { return *entry; }
+    }
+    return 0;
 }
 
 std::uint32_t ProgramImplCore::restore_retained_lane(std::uint32_t lane,
@@ -531,10 +785,10 @@ std::uint32_t ProgramImplCore::restore_retained_lane(std::uint32_t lane,
         throw std::invalid_argument("session snapshot was saved for a different model");
     }
 
-    const PagedKVPool& text_pool         = decoder->text_kv.pool();
-    const qwen3_6::PagedKVCache* backend = backend_kv_cache();
+    const PagedKVPool& text_pool           = decoder->text_kv.pool();
+    const qwen3_6::PagedKVCache* backend   = backend_kv_cache();
     const LinearAttentionStatePool& states = decoder->linear_attention;
-    const std::int32_t current_slot    = LinearStateSlots::current_state_slot(lane, max_concurrency);
+    const std::int32_t current_slot = LinearStateSlots::current_state_slot(lane, max_concurrency);
     const std::int32_t checkpoint_slot =
         LinearStateSlots::turn_checkpoint_state_slot(lane, max_concurrency);
     const std::size_t conv_bytes      = states.conv_slot(0, current_slot).bytes();
@@ -576,8 +830,7 @@ std::uint32_t ProgramImplCore::restore_retained_lane(std::uint32_t lane,
     if (session.tokens == 0 || session.tokens > capacity) {
         throw std::invalid_argument("session snapshot depth exceeds the server context");
     }
-    if (session.ledger_frontier != session.tokens ||
-        session.execution_frontier > session.tokens ||
+    if (session.ledger_frontier != session.tokens || session.execution_frontier > session.tokens ||
         session.tokens - session.execution_frontier > 1 ||
         session.text_kv_valid > session.execution_frontier ||
         session.mtp_kv_valid > session.tokens ||
@@ -590,9 +843,8 @@ std::uint32_t ProgramImplCore::restore_retained_lane(std::uint32_t lane,
     if (session.text_pages == 0 || session.text_pages > text_pool.logical_page_capacity() ||
         !covers(session.text_pages, session.text_kv_valid) ||
         (backend != nullptr) != (session.backend_pages != 0) ||
-        (backend != nullptr &&
-         (session.backend_pages > backend->pool().logical_page_capacity() ||
-          !covers(session.backend_pages, session.mtp_kv_valid)))) {
+        (backend != nullptr && (session.backend_pages > backend->pool().logical_page_capacity() ||
+                                !covers(session.backend_pages, session.mtp_kv_valid)))) {
         throw std::invalid_argument("session snapshot page counts are out of range");
     }
 
@@ -622,9 +874,8 @@ std::uint32_t ProgramImplCore::restore_retained_lane(std::uint32_t lane,
 
     const std::uint8_t* tail_payload =
         session.tail_hidden_valid != 0 ? reader.payload(config.tail_hidden_bytes) : nullptr;
-    const std::uint8_t* current_conv = reader.payload(conv_bytes * config.gdn_layers);
-    const std::uint8_t* current_recurrent =
-        reader.payload(recurrent_bytes * config.gdn_layers);
+    const std::uint8_t* current_conv         = reader.payload(conv_bytes * config.gdn_layers);
+    const std::uint8_t* current_recurrent    = reader.payload(recurrent_bytes * config.gdn_layers);
     const std::uint8_t* checkpoint_hidden    = nullptr;
     const std::uint8_t* checkpoint_conv      = nullptr;
     const std::uint8_t* checkpoint_recurrent = nullptr;
@@ -633,8 +884,7 @@ std::uint32_t ProgramImplCore::restore_retained_lane(std::uint32_t lane,
         checkpoint_conv      = reader.payload(conv_bytes * config.gdn_layers);
         checkpoint_recurrent = reader.payload(recurrent_bytes * config.gdn_layers);
     }
-    const std::uint8_t* text_payload =
-        reader.payload(config.text_page_bytes * session.text_pages);
+    const std::uint8_t* text_payload = reader.payload(config.text_page_bytes * session.text_pages);
     const std::uint8_t* backend_payload =
         session.backend_pages != 0
             ? reader.payload(config.backend_page_bytes * session.backend_pages)
@@ -656,8 +906,8 @@ std::uint32_t ProgramImplCore::restore_retained_lane(std::uint32_t lane,
                 throw std::invalid_argument(
                     "session snapshot checkpoint frontiers are inconsistent");
             }
-            previous_frontier          = entry.frontier;
-            const std::uint8_t* hidden = reader.payload(config.tail_hidden_bytes);
+            previous_frontier             = entry.frontier;
+            const std::uint8_t* hidden    = reader.payload(config.tail_hidden_bytes);
             const std::uint8_t* ring_conv = reader.payload(conv_bytes * config.gdn_layers);
             const std::uint8_t* ring_recurrent =
                 reader.payload(recurrent_bytes * config.gdn_layers);
@@ -665,8 +915,8 @@ std::uint32_t ProgramImplCore::restore_retained_lane(std::uint32_t lane,
             entry.conv.assign(ring_conv, ring_conv + conv_bytes * config.gdn_layers);
             entry.recurrent.assign(ring_recurrent,
                                    ring_recurrent + recurrent_bytes * config.gdn_layers);
-            entry.session_digest = ledger_prefix_digest(
-                std::span<const TokenId>(ledger.data(), entry.frontier));
+            entry.session_digest =
+                ledger_prefix_digest(std::span<const TokenId>(ledger.data(), entry.frontier));
             checkpoint_ring.push_back(std::move(entry));
         }
     }
@@ -694,53 +944,44 @@ std::uint32_t ProgramImplCore::restore_retained_lane(std::uint32_t lane,
             sequence.kv->backend->materialize_pages(session.backend_pages, device.stream);
         }
 
+        HostTransferStager& transfer = session_transfer_stager();
         decoder->text_kv.pool().copy_pages_from_host(sequence.kv->text.page_ids(), text_payload,
-                                                     device.stream);
+                                                     transfer);
         if (backend_payload != nullptr) {
             backend_kv_cache()->pool().copy_pages_from_host(sequence.kv->backend->page_ids(),
-                                                            backend_payload, device.stream);
+                                                            backend_payload, transfer);
         }
         LinearAttentionStatePool& mutable_states = decoder->linear_attention;
-        const auto restore_gdn_slot = [&](std::int32_t slot, const std::uint8_t* conv,
-                                          const std::uint8_t* recurrent) {
-            for (std::uint32_t layer = 0; layer < config.gdn_layers; ++layer) {
-                const Tensor conv_state = mutable_states.conv_slot(layer, slot);
-                CUDA_CHECK(cudaMemcpyAsync(conv_state.data, conv + layer * conv_bytes, conv_bytes,
-                                           cudaMemcpyHostToDevice, device.stream));
-                const Tensor recurrent_state = mutable_states.recurrent_slot(layer, slot);
-                CUDA_CHECK(cudaMemcpyAsync(recurrent_state.data,
-                                           recurrent + layer * recurrent_bytes, recurrent_bytes,
-                                           cudaMemcpyHostToDevice, device.stream));
-            }
+        const auto restore_gdn_slot              = [&](std::int32_t slot, const std::uint8_t* conv,
+                                                       const std::uint8_t* recurrent) {
+            mutable_states.copy_slot_from_host(slot, conv, recurrent, transfer);
         };
         restore_gdn_slot(current_slot, current_conv, current_recurrent);
         if (session.turn_checkpoint_valid != 0) {
             restore_gdn_slot(checkpoint_slot, checkpoint_conv, checkpoint_recurrent);
-            CUDA_CHECK(cudaMemcpyAsync(sequence.turn_checkpoint_hidden.data, checkpoint_hidden,
-                                       config.tail_hidden_bytes, cudaMemcpyHostToDevice,
-                                       device.stream));
+            transfer.host_to_device(sequence.turn_checkpoint_hidden.data, checkpoint_hidden,
+                                    config.tail_hidden_bytes);
         }
         if (tail_payload != nullptr) {
-            CUDA_CHECK(cudaMemcpyAsync(sequence.tail_hidden.data, tail_payload,
-                                       config.tail_hidden_bytes, cudaMemcpyHostToDevice,
-                                       device.stream));
+            transfer.host_to_device(sequence.tail_hidden.data, tail_payload,
+                                    config.tail_hidden_bytes);
         }
-        device.synchronize();
+        transfer.finish();
 
         sequence.ledger = std::move(ledger);
         sequence.prefix_identity.restore(std::move(token_types), std::move(positions),
                                          std::move(vision_items));
-        sequence.execution_frontier       = session.execution_frontier;
-        sequence.ledger_frontier          = session.ledger_frontier;
-        sequence.text_kv_valid            = session.text_kv_valid;
-        sequence.mtp_kv_valid             = session.mtp_kv_valid;
-        sequence.dflash_context_frontier  = 0;
-        sequence.rope_delta               = session.rope_delta;
-        sequence.mtp_draft_count          = 0;
-        sequence.tail_hidden_valid        = session.tail_hidden_valid != 0;
-        sequence.turn_checkpoint          = TurnCheckpoint{
-                     .valid    = session.turn_checkpoint_valid != 0,
-                     .frontier = session.turn_checkpoint_frontier,
+        sequence.execution_frontier      = session.execution_frontier;
+        sequence.ledger_frontier         = session.ledger_frontier;
+        sequence.text_kv_valid           = session.text_kv_valid;
+        sequence.mtp_kv_valid            = session.mtp_kv_valid;
+        sequence.dflash_context_frontier = 0;
+        sequence.rope_delta              = session.rope_delta;
+        sequence.mtp_draft_count         = 0;
+        sequence.tail_hidden_valid       = session.tail_hidden_valid != 0;
+        sequence.turn_checkpoint         = TurnCheckpoint{
+            .valid    = session.turn_checkpoint_valid != 0,
+            .frontier = session.turn_checkpoint_frontier,
         };
         sequence.checkpoint_ring = std::move(checkpoint_ring);
         discard_checkpoint_staging(sequence);

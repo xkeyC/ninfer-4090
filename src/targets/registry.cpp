@@ -53,6 +53,9 @@ void validate_options(const EngineOptions& options) {
     if (options.max_pending_requests == 0 || options.pending_timeout_ms == 0) {
         throw std::invalid_argument("Engine pending request capacity and timeout must be nonzero");
     }
+    if (options.kv_affinity_burst > 1024 || options.kv_affinity_grace_ms > 60000) {
+        throw std::invalid_argument("Engine KV affinity bounds are invalid");
+    }
 }
 
 artifact::LoadProgress artifact_progress(const LoadProgress& progress) {

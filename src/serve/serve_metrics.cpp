@@ -9,8 +9,7 @@ namespace {
 
 void append_counter(std::string& out, const char* name, std::uint64_t value) {
     char line[160];
-    std::snprintf(line, sizeof(line), "%s %llu\n", name,
-                  static_cast<unsigned long long>(value));
+    std::snprintf(line, sizeof(line), "%s %llu\n", name, static_cast<unsigned long long>(value));
     out += line;
 }
 
@@ -40,9 +39,8 @@ std::vector<std::pair<std::uint64_t, int>> ServeMetrics::active_snapshot() const
 void ServeMetrics::record(const GenerationOutcome& outcome) {
     const GenerationMetrics& m = outcome.metrics;
     const std::uint64_t cached = m.prefix_cache_hit_tokens;
-    const std::uint64_t prompt = outcome.prompt_tokens > 0
-                                     ? static_cast<std::uint64_t>(outcome.prompt_tokens)
-                                     : 0;
+    const std::uint64_t prompt =
+        outcome.prompt_tokens > 0 ? static_cast<std::uint64_t>(outcome.prompt_tokens) : 0;
 
     const std::lock_guard<std::mutex> lock(mutex_);
     requests_total_ += 1;
@@ -75,6 +73,29 @@ std::string ServeMetrics::render(std::uint32_t max_concurrency,
     append_counter(out, "llamacpp:requests_deferred", in_flight - processing);
     append_counter(out, "ninfer:requests_total", requests_total_);
     append_counter(out, "ninfer:prefix_cache_hit_tokens_total", prefix_cache_hit_tokens_total_);
+    append_counter(out, "ninfer:host_prefix_cache_captures_total", live.host_prefix_cache_captures);
+    append_counter(out, "ninfer:host_prefix_cache_hits_total", live.host_prefix_cache_hits);
+    append_counter(out, "ninfer:host_prefix_cache_drops_total", live.host_prefix_cache_drops);
+    append_counter(out, "ninfer:host_prefix_cache_evictions_total",
+                   live.host_prefix_cache_evictions);
+    append_counter(out, "ninfer:host_prefix_cache_capture_failures_total",
+                   live.host_prefix_cache_capture_failures);
+    append_counter(out, "ninfer:host_prefix_cache_restore_failures_total",
+                   live.host_prefix_cache_restore_failures);
+    append_counter(out, "ninfer:host_prefix_cache_capture_bytes_total",
+                   live.host_prefix_cache_capture_bytes);
+    append_counter(out, "ninfer:host_prefix_cache_restore_bytes_total",
+                   live.host_prefix_cache_restore_bytes);
+    append_counter(out, "ninfer:host_prefix_cache_capture_seconds_total",
+                   live.host_prefix_cache_capture_seconds);
+    append_counter(out, "ninfer:host_prefix_cache_restore_seconds_total",
+                   live.host_prefix_cache_restore_seconds);
+    append_counter(out, "ninfer:host_prefix_cache_entries",
+                   static_cast<std::uint64_t>(live.host_prefix_cache_entries));
+    append_counter(out, "ninfer:host_prefix_cache_blocks",
+                   static_cast<std::uint64_t>(live.host_prefix_cache_blocks));
+    append_counter(out, "ninfer:host_prefix_cache_bytes",
+                   static_cast<std::uint64_t>(live.host_prefix_cache_bytes));
     append_counter(out, "ninfer:draft_tokens_total", speculative_draft_tokens_total_);
     append_counter(out, "ninfer:draft_accepted_tokens_total", speculative_accepted_tokens_total_);
     return out;

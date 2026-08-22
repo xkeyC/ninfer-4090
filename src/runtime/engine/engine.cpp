@@ -161,6 +161,17 @@ public:
                 }
             },
             active);
+        if (options.host_prefix_cache_bytes != 0) {
+            const std::string binding = slot_model_binding(load);
+            std::visit(
+                [&](auto& constructed_executor) {
+                    using ExecutorPtr = std::remove_cvref_t<decltype(constructed_executor)>;
+                    if constexpr (!std::is_same_v<ExecutorPtr, std::monostate>) {
+                        constructed_executor->set_host_prefix_cache_model_binding(binding);
+                    }
+                },
+                executor);
+        }
         if (options.auto_save_evicted) {
             std::visit(
                 [&](auto& constructed_executor) {
@@ -195,7 +206,9 @@ public:
 
     void enqueue_write(std::string path, targets::qwen3_6::RetainedSessionSnapshot&& snapshot) {
         std::unique_lock lock(writer_mutex);
-        if (!writer.joinable()) { writer = std::thread([this] { writer_loop(); }); }
+        if (!writer.joinable()) {
+            writer = std::thread([this] { writer_loop(); });
+        }
         pending_writes.push_back(PendingWrite{std::move(path), std::move(snapshot)});
         lock.unlock();
         writer_cv.notify_one();
@@ -241,9 +254,7 @@ private:
             const auto started = std::chrono::steady_clock::now();
             try {
                 write_snapshot_file(item.path, item.snapshot.bytes);
-            } catch (const std::exception& error) {
-                event.error = error.what();
-            } catch (...) {
+            } catch (const std::exception& error) { event.error = error.what(); } catch (...) {
                 event.error = "unknown auto-save failure";
             }
             event.seconds =
@@ -489,7 +500,7 @@ SlotSaveResult Engine::save_slot(std::uint32_t lane, const std::string& path,
     const auto started = std::chrono::steady_clock::now();
     // A pending auto-save of the same path must not land after this explicit save.
     impl_->drain_writes();
-    const std::string binding = slot_model_binding(impl_->load);
+    const std::string binding                          = slot_model_binding(impl_->load);
     targets::qwen3_6::RetainedSessionSnapshot snapshot = std::visit(
         [&](auto& executor) -> targets::qwen3_6::RetainedSessionSnapshot {
             using Executor = std::remove_cvref_t<decltype(executor)>;
@@ -507,7 +518,8 @@ SlotSaveResult Engine::save_slot(std::uint32_t lane, const std::string& path,
     result.tokens         = snapshot.tokens;
     result.bytes          = snapshot.bytes.size();
     result.session_digest = std::move(snapshot.session_digest);
-    result.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    result.seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
     return result;
 }
 
@@ -518,9 +530,7 @@ SlotRestoreResult Engine::restore_slot(std::uint32_t lane, const std::string& pa
     impl_->drain_writes();
 
     std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) {
-        throw std::invalid_argument("session snapshot file is unavailable");
-    }
+    if (!file.is_open()) { throw std::invalid_argument("session snapshot file is unavailable"); }
     const std::streamsize size = file.tellg();
     if (size <= 0) { throw std::invalid_argument("session snapshot file is empty"); }
     std::vector<std::uint8_t> snapshot(static_cast<std::size_t>(size));
@@ -530,15 +540,15 @@ SlotRestoreResult Engine::restore_slot(std::uint32_t lane, const std::string& pa
     file.close();
 
     const std::string binding = slot_model_binding(impl_->load);
-    auto restored = std::visit(
+    auto restored             = std::visit(
         [&](auto& executor) -> std::pair<std::uint32_t, std::string> {
             using Executor = std::remove_cvref_t<decltype(executor)>;
             if constexpr (std::is_same_v<Executor, std::monostate>) {
                 throw std::logic_error("concurrent Engine executor is unavailable");
             } else {
                 return executor->restore_retained_lane(
-                    lane, std::span<const std::uint8_t>(snapshot.data(), snapshot.size()),
-                    binding, path);
+                    lane, std::span<const std::uint8_t>(snapshot.data(), snapshot.size()), binding,
+                    path);
             }
         },
         impl_->executor);
@@ -547,7 +557,8 @@ SlotRestoreResult Engine::restore_slot(std::uint32_t lane, const std::string& pa
     result.tokens         = restored.first;
     result.bytes          = snapshot.size();
     result.session_digest = std::move(restored.second);
-    result.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    result.seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
     return result;
 }
 

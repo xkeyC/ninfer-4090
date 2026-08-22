@@ -1,6 +1,7 @@
 #include "core/linear_attention_state.h"
 
 #include "core/device.h"
+#include "core/host_transfer.h"
 
 #include <limits>
 #include <stdexcept>
@@ -209,6 +210,46 @@ void LinearAttentionStatePool::copy_slot(std::int32_t src, std::int32_t dst, cud
         CUDA_CHECK(cudaMemcpyAsync(destination.data, source.data, source.bytes(),
                                    cudaMemcpyDeviceToDevice, stream));
     }
+}
+
+void LinearAttentionStatePool::copy_slot_to_host(std::int32_t slot, void* conv_host,
+                                                 void* recurrent_host,
+                                                 HostTransferStager& transfer) const {
+    validate_layer_slot(*this, 0, slot, "LinearAttentionStatePool copy_slot_to_host");
+    const LinearAttentionStateAllLayersView view = all_layers_view();
+    const Tensor first_conv                      = conv_slot(0, slot);
+    const Tensor first_recurrent                 = recurrent_slot(0, slot);
+    const std::size_t conv_pitch = view.conv_layer_stride_bytes == 0
+                                       ? first_conv.bytes()
+                                       : static_cast<std::size_t>(view.conv_layer_stride_bytes);
+    const std::size_t recurrent_pitch =
+        view.recurrent_layer_stride_bytes == 0
+            ? first_recurrent.bytes()
+            : static_cast<std::size_t>(view.recurrent_layer_stride_bytes);
+    transfer.device_to_host_2d(conv_host, first_conv.data, conv_pitch, first_conv.bytes(),
+                               layer_count());
+    transfer.device_to_host_2d(recurrent_host, first_recurrent.data, recurrent_pitch,
+                               first_recurrent.bytes(), layer_count());
+}
+
+void LinearAttentionStatePool::copy_slot_from_host(std::int32_t slot, const void* conv_host,
+                                                   const void* recurrent_host,
+                                                   HostTransferStager& transfer) {
+    validate_layer_slot(*this, 0, slot, "LinearAttentionStatePool copy_slot_from_host");
+    const LinearAttentionStateAllLayersView view = all_layers_view();
+    const Tensor first_conv                      = conv_slot(0, slot);
+    const Tensor first_recurrent                 = recurrent_slot(0, slot);
+    const std::size_t conv_pitch = view.conv_layer_stride_bytes == 0
+                                       ? first_conv.bytes()
+                                       : static_cast<std::size_t>(view.conv_layer_stride_bytes);
+    const std::size_t recurrent_pitch =
+        view.recurrent_layer_stride_bytes == 0
+            ? first_recurrent.bytes()
+            : static_cast<std::size_t>(view.recurrent_layer_stride_bytes);
+    transfer.host_to_device_2d(first_conv.data, conv_pitch, conv_host, first_conv.bytes(),
+                               layer_count());
+    transfer.host_to_device_2d(first_recurrent.data, recurrent_pitch, recurrent_host,
+                               first_recurrent.bytes(), layer_count());
 }
 
 void LinearAttentionStatePool::zero_slot(std::int32_t slot, cudaStream_t stream) {

@@ -4,6 +4,7 @@
 
 #include "core/arena.h"
 #include "core/gdn_replay_records.h"
+#include "core/host_transfer.h"
 #include "ninfer/ops/sampling.h"
 #include "core/decode_graph.h"
 #include <ninfer/targets/qwen3_6/prepared_prompt.h>
@@ -253,10 +254,13 @@ public:
     void evict_retained_lane(std::uint32_t lane) noexcept;
     [[nodiscard]] std::uint32_t retained_lane_depth(std::uint32_t lane) const noexcept;
     [[nodiscard]] std::string retained_lane_digest(std::uint32_t lane) const;
-    [[nodiscard]] std::vector<SlotCheckpoint>
-    retained_lane_checkpoints(std::uint32_t lane) const;
+    [[nodiscard]] std::vector<SlotCheckpoint> retained_lane_checkpoints(std::uint32_t lane) const;
     [[nodiscard]] qwen3_6::RetainedSessionSnapshot
-    save_retained_lane(std::uint32_t lane, std::string_view model_binding);
+    save_retained_lane(std::uint32_t lane, std::string_view model_binding,
+                       std::span<const std::uint8_t> base_snapshot = {});
+    [[nodiscard]] std::uint32_t
+    reusable_snapshot_prefix(const qwen3_6::RetainedSessionSnapshot& snapshot,
+                             const PreparedPromptData& prompt, bool allow_prefix_reuse) const;
     [[nodiscard]] std::uint32_t restore_retained_lane(std::uint32_t lane,
                                                       std::span<const std::uint8_t> snapshot,
                                                       std::string_view model_binding);
@@ -335,6 +339,10 @@ public:
     std::array<CheckpointStaging, kMaximumConcurrency> checkpoint_staging{};
     std::array<cudaEvent_t, kMaximumConcurrency> checkpoint_staging_events{};
 
+    // Lazily allocated because session persistence and the host victim cache are optional. Two
+    // fixed-size pinned buffers bridge large pageable snapshots without pinning the cache itself.
+    std::optional<HostTransferStager> session_transfer;
+
     std::size_t workspace_logical_peak_bytes = 0;
 
 private:
@@ -345,11 +353,11 @@ private:
     [[nodiscard]] std::size_t checkpoint_recurrent_bytes() const noexcept;
     [[nodiscard]] std::size_t checkpoint_entry_bytes() const noexcept;
     [[nodiscard]] std::uint8_t* checkpoint_staging_base(std::uint32_t lane) const noexcept;
+    HostTransferStager& session_transfer_stager();
     void stage_turn_checkpoint(SequenceState& sequence);
     void drain_checkpoint_staging(SequenceState& sequence);
     void discard_checkpoint_staging(SequenceState& sequence) noexcept;
-    void invalidate_checkpoint_ring(SequenceState& sequence,
-                                    std::uint32_t keep_through) noexcept;
+    void invalidate_checkpoint_ring(SequenceState& sequence, std::uint32_t keep_through) noexcept;
     [[nodiscard]] bool upload_ring_checkpoint(SequenceState& sequence, std::uint32_t frontier);
     void append_ring_checkpoint(SequenceState& sequence, HostTurnCheckpoint&& entry);
     void prepare_graphs();

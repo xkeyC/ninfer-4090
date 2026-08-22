@@ -31,13 +31,13 @@ std::map<std::string, double> parse(const std::string& body) {
 GenerationOutcome outcome(int prompt, std::uint32_t cached, int completion, double prefill_s,
                           double decode_s, std::uint64_t drafted, std::uint64_t accepted) {
     GenerationOutcome out;
-    out.prompt_tokens                        = prompt;
-    out.completion_tokens                    = completion;
-    out.metrics.prefix_cache_hit_tokens      = cached;
-    out.metrics.prefill_seconds              = prefill_s;
-    out.metrics.decode_seconds               = decode_s;
-    out.metrics.speculative_draft_tokens     = drafted;
-    out.metrics.speculative_accepted_tokens  = accepted;
+    out.prompt_tokens                       = prompt;
+    out.completion_tokens                   = completion;
+    out.metrics.prefix_cache_hit_tokens     = cached;
+    out.metrics.prefill_seconds             = prefill_s;
+    out.metrics.decode_seconds              = decode_s;
+    out.metrics.speculative_draft_tokens    = drafted;
+    out.metrics.speculative_accepted_tokens = accepted;
     return out;
 }
 
@@ -87,18 +87,57 @@ int main() {
     failures += check(warm.prompt_tokens == 1200 && warm.cached_tokens == 900,
                       "last completed after warm request");
 
-    live.computed_prefill_tokens = 1300;
-    live.prefill_seconds_total   = 0.6;
-    live.committed_decode_tokens = 300;
-    live.decode_seconds_total    = 6.0;
-    const auto values = parse(metrics.render(1, live));
+    live.computed_prefill_tokens            = 1300;
+    live.prefill_seconds_total              = 0.6;
+    live.committed_decode_tokens            = 300;
+    live.decode_seconds_total               = 6.0;
+    live.host_prefix_cache_captures         = 3;
+    live.host_prefix_cache_hits             = 2;
+    live.host_prefix_cache_drops            = 1;
+    live.host_prefix_cache_evictions        = 4;
+    live.host_prefix_cache_capture_failures = 6;
+    live.host_prefix_cache_restore_failures = 7;
+    live.host_prefix_cache_capture_bytes    = 8ULL << 30;
+    live.host_prefix_cache_restore_bytes    = 9ULL << 30;
+    live.host_prefix_cache_capture_seconds  = 10.25;
+    live.host_prefix_cache_restore_seconds  = 11.5;
+    live.host_prefix_cache_entries          = 5;
+    live.host_prefix_cache_blocks           = 17;
+    live.host_prefix_cache_bytes            = 6ULL << 30;
+    const auto values                       = parse(metrics.render(1, live));
     failures += check(values.at("llamacpp:prompt_tokens_total") == 1300.0, "live prefill tokens");
     failures += check(values.at("llamacpp:prompt_seconds_total") == 0.6, "live prefill seconds");
     failures += check(values.at("llamacpp:tokens_predicted_total") == 300.0, "live decode tokens");
-    failures += check(values.at("llamacpp:tokens_predicted_seconds_total") == 6.0,
-                      "live decode seconds");
+    failures +=
+        check(values.at("llamacpp:tokens_predicted_seconds_total") == 6.0, "live decode seconds");
     failures += check(values.at("ninfer:requests_total") == 2.0, "request count");
     failures += check(values.at("ninfer:prefix_cache_hit_tokens_total") == 900.0, "cache hits");
+    failures +=
+        check(values.at("ninfer:host_prefix_cache_captures_total") == 3.0, "host cache captures");
+    failures += check(values.at("ninfer:host_prefix_cache_hits_total") == 2.0, "host cache hits");
+    failures += check(values.at("ninfer:host_prefix_cache_drops_total") == 1.0, "host cache drops");
+    failures +=
+        check(values.at("ninfer:host_prefix_cache_evictions_total") == 4.0, "host cache evictions");
+    failures += check(values.at("ninfer:host_prefix_cache_capture_failures_total") == 6.0,
+                      "host cache capture failures");
+    failures += check(values.at("ninfer:host_prefix_cache_restore_failures_total") == 7.0,
+                      "host cache restore failures");
+    failures += check(values.at("ninfer:host_prefix_cache_capture_bytes_total") ==
+                          static_cast<double>(8ULL << 30),
+                      "host cache capture bytes");
+    failures += check(values.at("ninfer:host_prefix_cache_restore_bytes_total") ==
+                          static_cast<double>(9ULL << 30),
+                      "host cache restore bytes");
+    failures += check(values.at("ninfer:host_prefix_cache_capture_seconds_total") == 10.25,
+                      "host cache capture seconds");
+    failures += check(values.at("ninfer:host_prefix_cache_restore_seconds_total") == 11.5,
+                      "host cache restore seconds");
+    failures += check(values.at("ninfer:host_prefix_cache_entries") == 5.0, "host cache entries");
+    failures += check(values.at("ninfer:host_prefix_cache_blocks") == 17.0,
+                      "host cache blocks");
+    failures +=
+        check(values.at("ninfer:host_prefix_cache_bytes") == static_cast<double>(6ULL << 30),
+              "host cache bytes");
     failures += check(values.at("ninfer:draft_tokens_total") == 450.0, "draft tokens");
     failures += check(values.at("ninfer:draft_accepted_tokens_total") == 225.0, "accepted tokens");
 

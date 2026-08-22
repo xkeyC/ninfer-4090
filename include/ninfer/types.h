@@ -95,6 +95,15 @@ struct EngineOptions {
     // re-prefills from the nearest checkpoint instead of from zero. Host memory cost per entry
     // is the model's full GDN state image (~147 MiB on Qwen3.8-27B).
     std::uint32_t turn_checkpoint_ring = 0;
+    // Byte-bounded host-RAM block cache for retained sequence images. Immutable snapshot blocks
+    // are deduplicated across manifests and ranked for eviction by recall recency/frequency.
+    // Matching prompts restore automatically. Zero disables the cache.
+    std::size_t host_prefix_cache_bytes = 0;
+    // Under KV-capacity pressure, prefer queued work matching the current resident session for
+    // this many consecutive admissions before rotating to the oldest competing session. The
+    // grace window lets a continuation request arrive after its previous response completes.
+    std::uint32_t kv_affinity_burst    = 5;
+    std::uint32_t kv_affinity_grace_ms = 1500;
     // Before an involuntary eviction destroys a retained session, snapshot it back to the slot
     // file it was last saved to or restored from (sessions that never touched a slot file are
     // not covered). The device snapshot runs on the eviction path; the file write runs on a
@@ -102,11 +111,11 @@ struct EngineOptions {
     bool auto_save_evicted = false;
     // Optional observer for auto-save outcomes; called on the writer thread.
     std::function<void(const SlotAutoSaveEvent&)> auto_save_listener;
-    KvCacheStorage kv_cache            = KvCacheStorage::BFloat16;
+    KvCacheStorage kv_cache = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
-    bool enable_vision                 = false;
-    std::uint32_t vision_max_tokens    = 8192;
-    bool use_cuda_graph = true;
+    bool enable_vision              = false;
+    std::uint32_t vision_max_tokens = 8192;
+    bool use_cuda_graph             = true;
     LoadProgress load_progress;
 };
 
@@ -443,12 +452,25 @@ struct RuntimeStats {
     double prefill_seconds_total = 0.0;
     double decode_seconds_total  = 0.0;
     // Decode batch executions and the sum of their batch sizes.
-    std::uint64_t decode_rounds         = 0;
-    std::uint64_t decode_row_rounds     = 0;
-    std::uint32_t running_requests      = 0;
-    std::uint32_t prefilling_requests   = 0;
-    std::uint32_t decode_ready_requests = 0;
-    std::uint32_t waiting_requests      = 0;
+    std::uint64_t decode_rounds                      = 0;
+    std::uint64_t decode_row_rounds                  = 0;
+    std::uint32_t running_requests                   = 0;
+    std::uint32_t prefilling_requests                = 0;
+    std::uint32_t decode_ready_requests              = 0;
+    std::uint32_t waiting_requests                   = 0;
+    std::uint64_t host_prefix_cache_captures         = 0;
+    std::uint64_t host_prefix_cache_hits             = 0;
+    std::uint64_t host_prefix_cache_drops            = 0;
+    std::uint64_t host_prefix_cache_evictions        = 0;
+    std::uint64_t host_prefix_cache_capture_failures = 0;
+    std::uint64_t host_prefix_cache_restore_failures = 0;
+    std::uint64_t host_prefix_cache_capture_bytes    = 0;
+    std::uint64_t host_prefix_cache_restore_bytes    = 0;
+    double host_prefix_cache_capture_seconds         = 0.0;
+    double host_prefix_cache_restore_seconds         = 0.0;
+    std::uint32_t host_prefix_cache_entries          = 0;
+    std::uint32_t host_prefix_cache_blocks           = 0;
+    std::size_t host_prefix_cache_bytes              = 0;
 };
 
 // Session persistence outcomes. Tokens count the resident session depth moved; bytes count the
@@ -481,10 +503,10 @@ struct SlotCheckpoint {
 // treat it as opaque and may pass it back as a slot-operation precondition. checkpoints lists
 // the retained turn checkpoints (oldest first) a diverging prompt can restore from.
 struct SlotState {
-    bool processing              = false;
-    bool retained                = false;
-    std::uint32_t prompt_tokens  = 0;
-    std::uint32_t cached_tokens  = 0;
+    bool processing             = false;
+    bool retained               = false;
+    std::uint32_t prompt_tokens = 0;
+    std::uint32_t cached_tokens = 0;
     std::string session_digest;
     std::vector<SlotCheckpoint> checkpoints;
 };

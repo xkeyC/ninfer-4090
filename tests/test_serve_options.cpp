@@ -36,27 +36,38 @@ int main() {
     failures += check(!defaults.enable_vision, "Vision is not disabled by default");
     failures += check(defaults.request_log_jsonl.empty(),
                       "request JSONL logging is not disabled by default");
-    failures += check(defaults.slot_save_path.empty(),
-                      "slot persistence is not disabled by default");
+    failures +=
+        check(defaults.slot_save_path.empty(), "slot persistence is not disabled by default");
     failures += check(defaults.turn_checkpoint_ring == 0,
                       "turn checkpoint ring is not disabled by default");
+    failures += check(defaults.host_prefix_cache_bytes == 0,
+                      "host prefix cache is not disabled by default");
+    failures += check(defaults.kv_affinity_burst == 5 && defaults.kv_affinity_grace_ms == 1500,
+                      "KV affinity defaults mismatch");
 
-    const ServeOptions ring =
-        parse({"ninfer-serve", "model.ninfer", "--turn-checkpoints", "8"});
+    const ServeOptions ring = parse({"ninfer-serve", "model.ninfer", "--turn-checkpoints", "8"});
     failures += check(ring.turn_checkpoint_ring == 8, "--turn-checkpoints was not applied");
     failures += check(!ring.auto_save_evicted, "auto-save-evicted is not disabled by default");
 
-    const ServeOptions auto_save = parse({"ninfer-serve", "model.ninfer", "--slot-save-path",
-                                          "/tmp/slots", "--auto-save-evicted"});
+    const ServeOptions host_cache =
+        parse({"ninfer-serve", "model.ninfer", "--host-prefix-cache-mib", "20480"});
+    failures += check(host_cache.host_prefix_cache_bytes == (20480ULL << 20),
+                      "--host-prefix-cache-mib was not applied");
+    const ServeOptions affinity =
+        parse({"ninfer-serve", "model.ninfer", "--kv-affinity-burst", "9",
+               "--kv-affinity-grace-ms", "750"});
+    failures += check(affinity.kv_affinity_burst == 9 && affinity.kv_affinity_grace_ms == 750,
+                      "KV affinity options were not applied");
+
+    const ServeOptions auto_save = parse(
+        {"ninfer-serve", "model.ninfer", "--slot-save-path", "/tmp/slots", "--auto-save-evicted"});
     failures += check(auto_save.auto_save_evicted, "--auto-save-evicted was not applied");
     bool auto_save_rejected = false;
     try {
         (void)parse({"ninfer-serve", "model.ninfer", "--auto-save-evicted"});
-    } catch (const std::invalid_argument&) {
-        auto_save_rejected = true;
-    }
-    failures += check(auto_save_rejected,
-                      "--auto-save-evicted without --slot-save-path was not rejected");
+    } catch (const std::invalid_argument&) { auto_save_rejected = true; }
+    failures +=
+        check(auto_save_rejected, "--auto-save-evicted without --slot-save-path was not rejected");
     failures += check(defaults.log_stats_interval_ms == 5000,
                       "periodic throughput interval default mismatch");
     failures += check(defaults.kv_capacity.mode == ninfer::KvCapacityMode::Explicit &&
@@ -77,25 +88,19 @@ int main() {
     failures += check(resolve_public_model_id(defaults, "artifact-model") == "artifact-model",
                       "artifact model id was not selected by default");
 
-    const ServeOptions rotor =
-        parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk8v4"});
-    failures += check(
-        rotor.kv_cache == ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64,
-        "--kv-dtype rk8v4 did not select rotated K8/V4 storage");
+    const ServeOptions rotor = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk8v4"});
+    failures += check(rotor.kv_cache == ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64,
+                      "--kv-dtype rk8v4 did not select rotated K8/V4 storage");
     failures += check(defaults.kv_cache == ninfer::KvCacheStorage::BFloat16,
                       "rk8v4 unexpectedly changed the default KV storage");
 
-    const ServeOptions k4e8 =
-        parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk4v4-e8"});
-    failures += check(
-        k4e8.kv_cache == ninfer::KvCacheStorage::RK4V4E8,
-        "--kv-dtype rk4v4-e8 did not select RK4V4E8 storage");
+    const ServeOptions k4e8 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk4v4-e8"});
+    failures += check(k4e8.kv_cache == ninfer::KvCacheStorage::RK4V4E8,
+                      "--kv-dtype rk4v4-e8 did not select RK4V4E8 storage");
 
-    const ServeOptions k2e8 =
-        parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk2v4-e8"});
-    failures += check(
-        k2e8.kv_cache == ninfer::KvCacheStorage::RK2V4E8,
-        "--kv-dtype rk2v4-e8 did not select RK2V4E8 storage");
+    const ServeOptions k2e8 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk2v4-e8"});
+    failures += check(k2e8.kv_cache == ninfer::KvCacheStorage::RK2V4E8,
+                      "--kv-dtype rk2v4-e8 did not select RK2V4E8 storage");
 
     const ServeOptions model_alias =
         parse({"ninfer-serve", "model.ninfer", "--model-id", "deployment-alias"});
@@ -125,6 +130,20 @@ int main() {
                      "--vision"});
     } catch (const std::invalid_argument&) { dflash_vision_rejected = true; }
     failures += check(dflash_vision_rejected, "DFlash and Vision were accepted together");
+    bool dflash_host_cache_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--spec", "dflash", "--draft-tokens", "15",
+                     "--host-prefix-cache-mib", "1"});
+    } catch (const std::invalid_argument&) { dflash_host_cache_rejected = true; }
+    failures += check(dflash_host_cache_rejected,
+                      "DFlash and the host prefix cache were accepted together");
+    bool disabled_reuse_host_cache_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--host-prefix-cache-mib", "1",
+                     "--no-prefix-reuse"});
+    } catch (const std::invalid_argument&) { disabled_reuse_host_cache_rejected = true; }
+    failures += check(disabled_reuse_host_cache_rejected,
+                      "host prefix cache was accepted with prefix reuse disabled");
 
     bool implicit_backend_rejected = false;
     try {
@@ -211,6 +230,9 @@ int main() {
               "serve help omits --log-stats-interval-ms");
     failures += check(serve_usage_text("ninfer-serve").find("--kv-capacity") != std::string::npos,
                       "serve help omits --kv-capacity");
+    failures +=
+        check(serve_usage_text("ninfer-serve").find("--host-prefix-cache-mib") != std::string::npos,
+              "serve help omits --host-prefix-cache-mib");
     failures += check(serve_usage_text("ninfer-serve").find("--response-store-max-mib") !=
                           std::string::npos,
                       "serve help omits Responses store limits");

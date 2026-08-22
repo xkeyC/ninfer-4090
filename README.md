@@ -11,6 +11,32 @@ This fork targets `sm_89` and Linux. Blackwell-only NVFP4/W4A4 execution is unav
 engine uses the same groupwise-int path as the 3090 base. The Windows path and the
 Qwen3.6-35B-A3B target are inherited but untested on the RTX 4090.
 
+## Long-context multi-session cache
+
+This fork adds a process-local host block cache for long agent conversations that outlive GPU KV
+residency. `--host-prefix-cache-mib N` partitions a retained snapshot into metadata, cumulative GDN
+state/checkpoints, and 64-token KV page groups. Byte-identical immutable blocks are stored once
+across conversation branches, while logical manifests remain available even when one copy is
+restored into a GPU lane. A later spill transfers only new or changed device blocks.
+
+Each block records its recall count and last-recall time. When the byte budget is full, eviction
+chooses the coldest unpinned block using recency plus a logarithmic frequency bonus and removes all
+dependent manifests atomically. This avoids the old all-or-nothing behavior where a single large
+session could exceed the host budget or destroy every reusable prefix on eviction.
+
+KV-affinity admission complements the block store. With `--kv-affinity-burst 5` (the default), a
+queued request matching the current GPU KV owner may pass cold work for at most five contended
+admissions; the scheduler then rotates to the oldest competing conversation. The bound advances
+only under real contention, and `--kv-affinity-grace-ms 1500` gives the current conversation a
+short window to submit its next turn before paying a multi-GiB owner switch.
+
+An RTX 4090 capacity test with three 90K-token branches produced three logical manifests backed by
+2,909 unique blocks using 2.67 GB of host RAM. A resident continuation completed in 1.68 seconds;
+an evicted 90K branch restored and answered in 10.27 seconds, with no capture or restore failures.
+See [Serving](docs/serving.md) for flags and metrics and
+[Concurrent inference architecture](docs/maintainer/concurrent-inference-architecture.md) for the
+ownership and fairness contracts.
+
 ## Measured results on the RTX 4090
 
 Conditions: single request, greedy decoding, CUDA Graphs on, INT8 KV, `--prefill-chunk 1024`,
@@ -126,6 +152,12 @@ updates, message rewrites, regenerated turns): the server then re-prefills from
 the nearest retained turn boundary instead of from zero. The ring costs host
 memory only, about 4.6 GiB per slot at 32 entries. See
 [docs/turn-checkpoint-ring.md](docs/turn-checkpoint-ring.md).
+
+Add `--host-prefix-cache-mib 20480` to preserve involuntarily evicted sessions in a process-local,
+byte-bounded host block cache. Immutable metadata, GDN checkpoints, and 64-token KV page groups are
+deduplicated across session branches; block recall time and frequency choose victims under memory
+pressure. A later compatible prompt restores the cached continuation automatically and prefills
+only its new suffix, without `/slots` client calls. DFlash is not supported.
 
 Extra requests beyond the slots wait in the admission queue, and the queue deadline
 defaults to 30 seconds. A deep prefill can hold a slot longer than that, so
@@ -277,7 +309,8 @@ GCC 13, and CMake 3.28 or newer; the Docker image builds with CUDA 13.1.
   `llamacpp:requests_processing`, `llamacpp:requests_deferred`), so existing scrapers read this
   server without changes. Prompt tokens count only computed prefill; prefix-cache hits are
   excluded, as in llama.cpp. Additional `ninfer:` series report request totals, prefix-cache
-  hits, and MTP draft/acceptance totals.
+  hits, MTP draft/acceptance totals, and host-prefix-cache captures/hits/drops/evictions,
+  capture/restore failures, transferred bytes and seconds, plus its live entry and byte gauges.
 - **`GET /slots`.** A llama.cpp-shaped slot table read from the engine's real lane state: busy
   slots report their request's prompt and reused-prefix sizes, idle retained slots report the
   resident session's depth and its identifying `session_digest`. Truthful per-slot attribution
@@ -311,6 +344,17 @@ GCC 13, and CMake 3.28 or newer; the Docker image builds with CUDA 13.1.
   back to the slot file it was last saved to or restored from, before the eviction destroys
   it. Rotating more sessions than slots then loses nothing: the next restore recovers the
   session at its latest frontier. Explicit `erase` never auto-saves.
+- **Automatic host prefix block cache.** `--host-prefix-cache-mib N` (off by default) captures an
+  involuntarily evicted session whether or not the client used `/slots`. Logical session manifests
+  share identical immutable blocks, remain matchable while restored into a lane, and return only
+  changed/new blocks on the next capture. Admission restores the deepest compatible frontier and
+  follows the ordinary suffix-prefill path. Under pressure, cold blocks are selected by recall
+  time plus a logarithmic recall-count bonus; dependent unpinned manifests are removed atomically.
+  DFlash is not supported.
+- **KV-affinity admission.** With the host cache enabled, `--kv-affinity-burst 5` lets work matching
+  a resident KV owner pass older cold work at most five contended admissions before rotating to
+  the oldest competing session. `--kv-affinity-grace-ms 1500` briefly waits for the just-finished
+  conversation's next turn. Both are configurable; a burst of `0` disables affinity scheduling.
 - **NVFP4-A4 test gating.** The A4 activation tests skip on hardware without FP4 tensor cores
   instead of aborting. The full remaining suite passes on the RTX 4090.
 - **E8 lattice KV quantization (ported).** The `rk8v4`/`rk4v4`/`rk4v4-e8`/`rk2v4-e8` KV modes

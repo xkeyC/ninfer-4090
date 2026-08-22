@@ -10,6 +10,8 @@
 
 namespace ninfer {
 
+class HostTransferStager;
+
 struct LinearAttentionStatePoolSpec {
     std::uint32_t layers        = 0;
     std::int32_t conv_channels  = 0;
@@ -69,6 +71,10 @@ struct LinearAttentionStatePool {
     [[nodiscard]] Tensor recurrent_slot(std::uint32_t layer, std::int32_t slot) const;
 
     void copy_slot(std::int32_t src, std::int32_t dst, cudaStream_t stream = nullptr);
+    void copy_slot_to_host(std::int32_t slot, void* conv_host, void* recurrent_host,
+                           HostTransferStager& transfer) const;
+    void copy_slot_from_host(std::int32_t slot, const void* conv_host, const void* recurrent_host,
+                             HostTransferStager& transfer);
     void zero_slot(std::int32_t slot, cudaStream_t stream = nullptr);
 };
 

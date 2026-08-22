@@ -15,6 +15,7 @@ out
 profiles
 logs
 models
+deploy
 
 **/__pycache__
 **/.venv

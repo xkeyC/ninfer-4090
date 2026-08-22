@@ -250,16 +250,19 @@ private:
 GenerationService::GenerationService(ServeOptions options, LoadProgress load_progress)
     : options_(std::move(options)) {
     ninfer::EngineOptions engine_options;
-    engine_options.artifact_path        = options_.artifact_path;
-    engine_options.device               = options_.device;
-    engine_options.max_context          = options_.max_context;
-    engine_options.kv_capacity          = options_.kv_capacity;
-    engine_options.max_concurrency      = options_.max_concurrency;
-    engine_options.max_pending_requests = options_.max_pending_requests;
-    engine_options.pending_timeout_ms   = options_.pending_timeout_ms;
-    engine_options.prefill_chunk        = options_.prefill_chunk;
-    engine_options.turn_checkpoint_ring = options_.turn_checkpoint_ring;
-    engine_options.auto_save_evicted    = options_.auto_save_evicted;
+    engine_options.artifact_path           = options_.artifact_path;
+    engine_options.device                  = options_.device;
+    engine_options.max_context             = options_.max_context;
+    engine_options.kv_capacity             = options_.kv_capacity;
+    engine_options.max_concurrency         = options_.max_concurrency;
+    engine_options.max_pending_requests    = options_.max_pending_requests;
+    engine_options.pending_timeout_ms      = options_.pending_timeout_ms;
+    engine_options.prefill_chunk           = options_.prefill_chunk;
+    engine_options.turn_checkpoint_ring    = options_.turn_checkpoint_ring;
+    engine_options.host_prefix_cache_bytes = options_.host_prefix_cache_bytes;
+    engine_options.kv_affinity_burst        = options_.kv_affinity_burst;
+    engine_options.kv_affinity_grace_ms     = options_.kv_affinity_grace_ms;
+    engine_options.auto_save_evicted       = options_.auto_save_evicted;
     if (options_.auto_save_evicted) {
         engine_options.auto_save_listener = [](const ninfer::SlotAutoSaveEvent& event) {
             if (event.error.empty()) {
@@ -273,15 +276,15 @@ GenerationService::GenerationService(ServeOptions options, LoadProgress load_pro
             }
         };
     }
-    engine_options.kv_cache             = options_.kv_cache;
-    engine_options.enable_vision        = options_.enable_vision;
-    engine_options.vision_max_tokens    = options_.vision_max_tokens;
-    engine_options.use_cuda_graph       = options_.use_cuda_graph;
-    engine_options.speculative          = options_.speculative;
-    engine_options.load_progress        = std::move(load_progress);
-    engine_              = std::make_unique<ninfer::Engine>(std::move(engine_options));
-    prompt_capabilities_ = engine_->prompt_capabilities();
-    request_capacity_    = std::make_shared<RequestCapacity>(
+    engine_options.kv_cache          = options_.kv_cache;
+    engine_options.enable_vision     = options_.enable_vision;
+    engine_options.vision_max_tokens = options_.vision_max_tokens;
+    engine_options.use_cuda_graph    = options_.use_cuda_graph;
+    engine_options.speculative       = options_.speculative;
+    engine_options.load_progress     = std::move(load_progress);
+    engine_                          = std::make_unique<ninfer::Engine>(std::move(engine_options));
+    prompt_capabilities_             = engine_->prompt_capabilities();
+    request_capacity_                = std::make_shared<RequestCapacity>(
         static_cast<std::size_t>(options_.max_concurrency) + options_.max_pending_requests);
     media_input_capacity_ = std::make_shared<MediaInputCapacity>();
 }

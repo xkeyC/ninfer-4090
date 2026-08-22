@@ -33,19 +33,22 @@ struct ServeOptions {
     std::uint32_t max_pending_requests     = 16;
     std::uint32_t pending_timeout_ms       = 30000;
     std::uint32_t prefill_chunk            = 1024;
-    std::uint32_t turn_checkpoint_ring     = 0; // 0 => host turn-checkpoint ring disabled
+    std::uint32_t turn_checkpoint_ring     = 0;     // 0 => host turn-checkpoint ring disabled
+    std::size_t host_prefix_cache_bytes    = 0;     // 0 => automatic host victim cache disabled
+    std::uint32_t kv_affinity_burst        = 5;
+    std::uint32_t kv_affinity_grace_ms     = 1500;
     bool auto_save_evicted                 = false; // spill evicted sessions to their slot file
-    std::uint32_t log_stats_interval_ms    = 5000; // 0 disables periodic Engine throughput logs
+    std::uint32_t log_stats_interval_ms    = 5000;  // 0 disables periodic Engine throughput logs
     std::size_t max_request_bytes          = kDefaultMaxRequestBytes;
     std::size_t response_store_max_records = kDefaultResponseStoreRecords;
     std::size_t response_store_max_bytes   = kDefaultResponseStoreBytes;
     int device                             = 0;
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
-    bool enable_vision                     = false;
-    std::uint32_t vision_max_tokens        = 8192;
-    bool use_cuda_graph                    = true;
-    bool allow_prefix_reuse = true;
+    bool enable_vision              = false;
+    std::uint32_t vision_max_tokens = 8192;
+    bool use_cuda_graph             = true;
+    bool allow_prefix_reuse         = true;
     bool enable_thinking =
         true; // default thinking mode for the generation prompt (--no-thinking opts out)
     bool preserve_thinking = false;

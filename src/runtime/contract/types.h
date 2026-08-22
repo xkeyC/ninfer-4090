@@ -49,6 +49,7 @@ struct AdmissionResources {
 struct RequestPlanSummary {
     std::uint32_t prompt_tokens           = 0;
     std::uint32_t reusable_prompt_tokens  = 0;
+    PrefixReusePath prefix_reuse_path     = PrefixReusePath::FullReset;
     std::uint32_t requested_output_tokens = 0;
     std::uint32_t effective_output_tokens = 0;
     FinishReason effective_limit_reason   = FinishReason::None;

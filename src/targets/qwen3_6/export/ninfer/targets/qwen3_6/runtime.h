@@ -5,6 +5,7 @@
 #include "runtime/contract/types.h"
 #include <ninfer/targets/qwen3_6/prepared_prompt.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -37,6 +38,27 @@ struct RetainedSessionSnapshot {
     std::vector<std::uint8_t> bytes;
     std::uint32_t tokens = 0;
     std::string session_digest;
+
+    // Host-cache-only framing. `cache_block_sizes` partitions `bytes` into immutable deduplication
+    // units; the target emits one unit for metadata/state and one per 64-token KV page group.
+    // `device_transfer_bytes` is the actual D2H payload for this capture, which can be smaller
+    // than the durable image when unchanged full KV pages came from a previous manifest.
+    std::vector<std::size_t> cache_block_sizes;
+    std::size_t cache_metadata_bytes = 0;
+    std::size_t device_transfer_bytes = 0;
+
+    // Host-only reuse metadata. It is deliberately outside the durable byte format: disk restore
+    // validates and rebuilds the same state, while the in-memory victim cache uses this image to
+    // reject non-matching prompts before paying an H2D restore.
+    std::uint32_t execution_frontier       = 0;
+    std::uint32_t mtp_kv_valid             = 0;
+    std::uint32_t turn_checkpoint_frontier = 0;
+    bool tail_hidden_valid                 = false;
+    std::vector<std::uint32_t> checkpoint_frontiers;
+    std::vector<TokenId> ledger;
+    std::vector<std::uint8_t> token_types;
+    std::array<std::vector<std::int32_t>, 3> positions;
+    std::vector<VisionItem> vision_items;
 };
 
 namespace detail {
@@ -189,13 +211,16 @@ public:
     [[nodiscard]] std::string retained_lane_digest(std::uint32_t lane) const;
     // Retained turn checkpoints of the lane's resident session, oldest first: the frontiers a
     // diverging prompt can restore from, each with the digest of the ledger prefix it covers.
-    [[nodiscard]] std::vector<SlotCheckpoint>
-    retained_lane_checkpoints(std::uint32_t lane) const;
+    [[nodiscard]] std::vector<SlotCheckpoint> retained_lane_checkpoints(std::uint32_t lane) const;
     // Session persistence for one idle retained lane. `model_binding` pins the snapshot to the
     // serving weights identity; restore rejects a mismatched binding or configuration. Both
     // synchronize the device before returning and require the lane to hold no active request.
-    [[nodiscard]] RetainedSessionSnapshot save_retained_lane(std::uint32_t lane,
-                                                             std::string_view model_binding);
+    [[nodiscard]] RetainedSessionSnapshot
+    save_retained_lane(std::uint32_t lane, std::string_view model_binding,
+                       std::span<const std::uint8_t> base_snapshot = {});
+    [[nodiscard]] std::uint32_t reusable_snapshot_prefix(const RetainedSessionSnapshot& snapshot,
+                                                         const PreparedPrompt& prompt,
+                                                         bool allow_prefix_reuse) const;
     [[nodiscard]] std::uint32_t restore_retained_lane(std::uint32_t lane,
                                                       std::span<const std::uint8_t> snapshot,
                                                       std::string_view model_binding);

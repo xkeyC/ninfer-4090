@@ -12,6 +12,8 @@
 
 namespace ninfer {
 
+class HostTransferStager;
+
 inline constexpr std::int32_t kPagedKVPageSize = 64;
 
 /**
@@ -141,6 +143,10 @@ public:
                             cudaStream_t stream = nullptr) const;
     void copy_pages_from_host(std::span<const std::int32_t> page_ids, const void* host,
                               cudaStream_t stream = nullptr);
+    void copy_pages_to_host(std::span<const std::int32_t> page_ids, void* host,
+                            HostTransferStager& transfer) const;
+    void copy_pages_from_host(std::span<const std::int32_t> page_ids, const void* host,
+                              HostTransferStager& transfer);
 
 private:
     friend class PagedKVAllocation;

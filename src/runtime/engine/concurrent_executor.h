@@ -5,6 +5,7 @@
 #include "ninfer/types.h"
 #include "runtime/contract/types.h"
 #include "runtime/engine/admission_policy.h"
+#include "runtime/engine/host_prefix_cache.h"
 #include "runtime/engine/request_memory.h"
 #include "runtime/generation/generation_budget.h"
 #include "targets/qwen3_6/export/ninfer/targets/qwen3_6/frontend.h"
@@ -42,6 +43,8 @@ public:
     using BasePlan = typename Package::RequestBasePlan;
     using Plan     = typename Package::RequestPlan;
     using Clock    = std::chrono::steady_clock;
+    using HostCache = HostPrefixCache<targets::qwen3_6::RetainedSessionSnapshot>;
+    using HostEntryId = typename HostCache::EntryId;
 
     ConcurrentExecutor(Instance& instance, const EngineOptions& options)
         : instance_(instance), max_concurrency_(options.max_concurrency),
@@ -49,6 +52,9 @@ public:
                            options.max_pending_requests),
           pending_timeout_(std::chrono::milliseconds(options.pending_timeout_ms)),
           auto_save_evicted_(options.auto_save_evicted),
+          host_prefix_cache_(options.host_prefix_cache_bytes),
+          kv_affinity_burst_(options.kv_affinity_burst),
+          kv_affinity_grace_(std::chrono::milliseconds(options.kv_affinity_grace_ms)),
           admission_capacity_(instance.program->admission_capacity()) {
         if (max_concurrency_ == 0 || max_concurrency_ > kMaximumConcurrency ||
             options.max_pending_requests == 0 || pending_timeout_.count() <= 0) {
@@ -57,6 +63,10 @@ public:
         if (admission_capacity_.active_lanes != max_concurrency_ ||
             admission_capacity_.main_kv_pages == 0) {
             throw std::logic_error("target admission capacity does not match the Engine");
+        }
+        if (host_prefix_cache_.enabled() &&
+            options.speculative.backend == SpeculativeBackend::DFlash) {
+            throw std::invalid_argument("host prefix cache does not support the DFlash backend");
         }
         worker_ = std::thread([this] { worker_loop(); });
     }
@@ -231,12 +241,13 @@ public:
             instance_.program->evict_retained_lane(lane);
             invalidate_lane_plans(lane);
         }
+        release_lane_host_entry(lane);
         lane_session_path_[lane].clear();
         const std::uint32_t tokens =
             instance_.program->restore_retained_lane(lane, snapshot, model_binding);
         invalidate_lane_plans(lane);
         if (!session_path.empty()) { lane_session_path_[lane] = session_path; }
-        retained_digest_cache_[lane] = instance_.program->retained_lane_digest(lane);
+        retained_digest_cache_[lane]      = instance_.program->retained_lane_digest(lane);
         retained_checkpoints_cache_[lane] = instance_.program->retained_lane_checkpoints(lane);
         publish_runtime_stats();
         return {tokens, retained_digest_cache_[lane]};
@@ -249,6 +260,7 @@ public:
         const std::uint32_t tokens = instance_.program->retained_lane_depth(lane);
         // Explicit erase is a deletion request: never auto-save, and drop the binding.
         lane_session_path_[lane].clear();
+        release_lane_host_entry(lane);
         if (instance_.program->has_retained_lane(lane)) {
             instance_.program->evict_retained_lane(lane);
             invalidate_lane_plans(lane);
@@ -265,6 +277,11 @@ public:
         std::scoped_lock lock(execution_mutex_);
         eviction_model_binding_ = std::move(model_binding);
         eviction_sink_          = std::move(sink);
+    }
+
+    void set_host_prefix_cache_model_binding(std::string model_binding) {
+        std::scoped_lock lock(execution_mutex_);
+        host_prefix_cache_model_binding_ = std::move(model_binding);
     }
 
     // Truthful per-lane occupancy: an active request's prompt size, or the retained session's
@@ -295,26 +312,88 @@ private:
         }
     }
 
-    // Best-effort spill of a retained session about to be destroyed involuntarily. The device
-    // snapshot runs on the calling thread (it synchronizes the stream); the file write happens
-    // on the Engine's writer thread through the sink. Only sessions bound to a slot file are
-    // spilled, and a spill failure never blocks the eviction itself.
+    void release_lane_host_entry(std::uint32_t lane) noexcept {
+        if (lane >= kMaximumConcurrency || !lane_host_cache_entry_[lane]) { return; }
+        (void)host_prefix_cache_.unpin(*lane_host_cache_entry_[lane]);
+        lane_host_cache_entry_[lane].reset();
+    }
+
+    // Best-effort preservation of a retained session about to be destroyed involuntarily. One
+    // device snapshot feeds the automatic host victim cache and, when configured and file-bound,
+    // the background disk writer. A preservation failure never blocks the eviction itself.
     void spill_retained_lane(std::uint32_t lane) noexcept {
-        if (!auto_save_evicted_ || !eviction_sink_ || lane >= kMaximumConcurrency) { return; }
-        if (lane_session_path_[lane].empty() || !instance_.program->has_retained_lane(lane)) {
-            return;
-        }
+        if (lane >= kMaximumConcurrency || !instance_.program->has_retained_lane(lane)) { return; }
+        const bool save_host =
+            host_prefix_cache_.enabled() && !host_prefix_cache_model_binding_.empty();
+        const bool save_disk =
+            auto_save_evicted_ && eviction_sink_ && !lane_session_path_[lane].empty();
+        if (!save_host && !save_disk) { return; }
+        const auto capture_started = Clock::now();
+        bool capture_time_recorded = false;
         try {
-            auto snapshot = instance_.program->save_retained_lane(lane, eviction_model_binding_);
-            eviction_sink_(lane_session_path_[lane], std::move(snapshot));
+            const std::string_view binding =
+                save_host ? std::string_view(host_prefix_cache_model_binding_)
+                          : std::string_view(eviction_model_binding_);
+            std::optional<targets::qwen3_6::RetainedSessionSnapshot> base_snapshot;
+            if (save_host && lane_host_cache_entry_[lane]) {
+                base_snapshot =
+                    host_prefix_cache_.materialize(*lane_host_cache_entry_[lane], false);
+            }
+            const std::span<const std::uint8_t> base_bytes =
+                base_snapshot ? std::span<const std::uint8_t>(base_snapshot->bytes.data(),
+                                                              base_snapshot->bytes.size())
+                              : std::span<const std::uint8_t>{};
+            auto snapshot = instance_.program->save_retained_lane(lane, binding, base_bytes);
+            release_lane_host_entry(lane);
+            if (save_host) {
+                cumulative_stats_.host_prefix_cache_capture_bytes +=
+                    snapshot.device_transfer_bytes;
+                cumulative_stats_.host_prefix_cache_capture_seconds +=
+                    std::chrono::duration<double>(Clock::now() - capture_started).count();
+                capture_time_recorded = true;
+            }
+            if (save_disk) {
+                // The ordinary deployment uses either sink. Keeping both configured is valid;
+                // the writer receives its own immutable image while the cache takes the original.
+                auto disk_snapshot =
+                    save_host ? snapshot : targets::qwen3_6::RetainedSessionSnapshot{};
+                if (save_host) {
+                    eviction_sink_(lane_session_path_[lane], std::move(disk_snapshot));
+                } else {
+                    eviction_sink_(lane_session_path_[lane], std::move(snapshot));
+                }
+            }
+            if (save_host) {
+                const auto inserted = host_prefix_cache_.insert(std::move(snapshot));
+                cumulative_stats_.host_prefix_cache_evictions += inserted.evicted;
+                if (inserted.inserted) {
+                    ++cumulative_stats_.host_prefix_cache_captures;
+                } else {
+                    ++cumulative_stats_.host_prefix_cache_drops;
+                }
+            }
         } catch (...) {
             // The session was going to be destroyed either way; losing the spill costs the
             // client one cold prefill, exactly the pre-feature behavior.
+            if (save_host) {
+                ++cumulative_stats_.host_prefix_cache_capture_failures;
+                if (!capture_time_recorded) {
+                    cumulative_stats_.host_prefix_cache_capture_seconds +=
+                        std::chrono::duration<double>(Clock::now() - capture_started).count();
+                }
+            }
         }
+        // spill_retained_lane is only called immediately before eviction or destructive branch
+        // reuse. The old manifest remains in the immutable cache but is no longer lane-pinned.
+        release_lane_host_entry(lane);
     }
 
     void publish_runtime_stats() {
-        RuntimeStats snapshot = cumulative_stats_;
+        RuntimeStats snapshot              = cumulative_stats_;
+        snapshot.host_prefix_cache_entries = static_cast<std::uint32_t>(host_prefix_cache_.size());
+        snapshot.host_prefix_cache_blocks =
+            static_cast<std::uint32_t>(host_prefix_cache_.block_count());
+        snapshot.host_prefix_cache_bytes   = host_prefix_cache_.used_bytes();
         {
             std::lock_guard lock(queue_mutex_);
             snapshot.waiting_requests = static_cast<std::uint32_t>(pending_.size());
@@ -431,6 +510,8 @@ private:
         std::optional<std::uint32_t> lane;
         std::atomic<bool> cancelled{false};
         bool decode_ready = false;
+        bool affinity_contended = false;
+        bool affinity_continuation = false;
 
         std::optional<BasePlan> base_plan;
         std::array<std::optional<Plan>, kMaximumConcurrency> lane_plans{};
@@ -479,11 +560,13 @@ private:
         None,
         ControlProgress,
         RanGpuUnit,
+        AffinityWait,
     };
 
     struct LaneChoice {
         std::uint32_t lane  = 0;
         bool evict_retained = false;
+        std::optional<HostEntryId> host_cache_entry;
     };
 
     void append_output(const std::shared_ptr<Request>& request,
@@ -584,6 +667,14 @@ private:
             retained_digest_cache_[*request->lane] = result.session_digest;
             retained_checkpoints_cache_[*request->lane] =
                 instance_.program->retained_lane_checkpoints(*request->lane);
+            if (!result.session_digest.empty() && kv_affinity_burst_ != 0 &&
+                host_prefix_cache_.enabled()) {
+                if (!affinity_lane_ || *affinity_lane_ != *request->lane) {
+                    affinity_lane_ = *request->lane;
+                    affinity_burst_used_ = 0;
+                }
+                affinity_grace_deadline_ = Clock::now() + kv_affinity_grace_;
+            }
         }
         if (request->first_token) {
             result.timings.first_token_seconds =
@@ -643,6 +734,7 @@ private:
 
     void remove_completed_slot(std::uint32_t lane) {
         slots_[lane].reset();
+        if (!instance_.program->has_retained_lane(lane)) { release_lane_host_entry(lane); }
         invalidate_lane_plans(lane);
     }
 
@@ -798,8 +890,8 @@ private:
         if (request == nullptr || request->decode_ready) {
             throw std::logic_error("staged prefill lane has invalid request state");
         }
-        const auto unit_started       = Clock::now();
-        const PrefillStepResult step  = instance_.program->advance_prefill_lane(lane);
+        const auto unit_started      = Clock::now();
+        const PrefillStepResult step = instance_.program->advance_prefill_lane(lane);
         cumulative_stats_.prefill_seconds_total +=
             std::chrono::duration<double>(Clock::now() - unit_started).count();
         const bool cancel_at_boundary = request->cancelled.load(std::memory_order_acquire);
@@ -847,6 +939,76 @@ private:
         request->lane_plan_versions[lane] = lane_plan_versions_[lane];
     }
 
+    [[nodiscard]] bool matches_resident_affinity(const std::shared_ptr<Request>& request) {
+        if (!affinity_lane_ || *affinity_lane_ >= max_concurrency_ ||
+            slots_[*affinity_lane_] != nullptr ||
+            !instance_.program->has_retained_lane(*affinity_lane_)) {
+            return false;
+        }
+        ensure_base_plan(request);
+        ensure_lane_plan(request, *affinity_lane_);
+        return request->lane_plans[*affinity_lane_]->summary().reusable_prompt_tokens != 0;
+    }
+
+    // Reorder only the local admission snapshot; the bounded FIFO remains the ownership queue.
+    // During contention, a resident continuation may bypass older cold work up to the configured
+    // burst. Once the burst is spent, the oldest competitor is promoted and starts a new epoch.
+    // If the continuation has not arrived yet, a short grace window avoids paying a multi-second
+    // owner switch for the sub-second frontend gap between sequential tool turns.
+    [[nodiscard]] bool apply_affinity_order(std::vector<std::shared_ptr<Request>>& queued) {
+        for (const auto& request : queued) {
+            request->affinity_contended = false;
+            request->affinity_continuation = false;
+        }
+        if (kv_affinity_burst_ == 0 || !host_prefix_cache_.enabled() || queued.empty() ||
+            !affinity_lane_) {
+            return false;
+        }
+        if (*affinity_lane_ >= max_concurrency_ || slots_[*affinity_lane_] != nullptr ||
+            !instance_.program->has_retained_lane(*affinity_lane_)) {
+            affinity_lane_.reset();
+            affinity_burst_used_ = 0;
+            affinity_grace_deadline_.reset();
+            return false;
+        }
+
+        std::vector<bool> matching(queued.size(), false);
+        bool have_match = false;
+        bool have_competitor = false;
+        for (std::size_t index = 0; index < queued.size(); ++index) {
+            try {
+                matching[index] = matches_resident_affinity(queued[index]);
+            } catch (...) {
+                matching[index] = false;
+            }
+            have_match = have_match || matching[index];
+            have_competitor = have_competitor || !matching[index];
+        }
+        if (!have_competitor) { return false; }
+
+        std::size_t selected = queued.size();
+        bool continuation = false;
+        if (affinity_burst_used_ < kv_affinity_burst_ && have_match) {
+            selected = static_cast<std::size_t>(
+                std::find(matching.begin(), matching.end(), true) - matching.begin());
+            continuation = true;
+        } else if (affinity_burst_used_ >= kv_affinity_burst_) {
+            selected = static_cast<std::size_t>(
+                std::find(matching.begin(), matching.end(), false) - matching.begin());
+        } else if (affinity_grace_deadline_ && Clock::now() < *affinity_grace_deadline_) {
+            return true;
+        }
+
+        if (selected == queued.size()) { selected = 0; }
+        if (selected != 0) {
+            std::rotate(queued.begin(), queued.begin() + static_cast<std::ptrdiff_t>(selected),
+                        queued.begin() + static_cast<std::ptrdiff_t>(selected + 1));
+        }
+        queued.front()->affinity_contended = true;
+        queued.front()->affinity_continuation = continuation;
+        return false;
+    }
+
     // Lane choice maximizes reusable prefix; ties break toward the lane whose occupation costs
     // least to replace - an empty lane before any retained session, then the shallowest
     // retained session - so a fresh request never clobbers a deep resident session while a
@@ -872,23 +1034,49 @@ private:
                 selected_cost  = cost;
             }
         }
-        if (selected) { return selected; }
-
-        for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
-            if (slots_[lane] != nullptr) { continue; }
-            ensure_lane_plan(request, lane);
-            const Plan& plan          = *request->lane_plans[lane];
-            const std::uint32_t reuse = plan.summary().reusable_prompt_tokens;
-            const std::uint32_t cost  = instance_.program->retained_lane_depth(lane);
-            if (instance_.program->can_admit_lane_after_retained_eviction(lane, plan) &&
-                prefer(reuse, cost)) {
-                selected = LaneChoice{
-                    .lane           = lane,
-                    .evict_retained = true,
-                };
-                selected_reuse = reuse;
-                selected_cost  = cost;
+        if (!selected) {
+            for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
+                if (slots_[lane] != nullptr) { continue; }
+                ensure_lane_plan(request, lane);
+                const Plan& plan          = *request->lane_plans[lane];
+                const std::uint32_t reuse = plan.summary().reusable_prompt_tokens;
+                const std::uint32_t cost  = instance_.program->retained_lane_depth(lane);
+                if (instance_.program->can_admit_lane_after_retained_eviction(lane, plan) &&
+                    prefer(reuse, cost)) {
+                    selected = LaneChoice{
+                        .lane           = lane,
+                        .evict_retained = true,
+                    };
+                    selected_reuse = reuse;
+                    selected_cost  = cost;
+                }
             }
+        }
+
+        const auto host_match = host_prefix_cache_.best_match(
+            [&](const targets::qwen3_6::RetainedSessionSnapshot& snapshot) {
+                return instance_.program->reusable_snapshot_prefix(
+                    snapshot, request->prompt, request->options.execution.allow_prefix_reuse);
+            });
+        if (host_match && host_match->reused_tokens > selected_reuse) {
+            std::optional<LaneChoice> host_choice;
+            std::uint32_t host_cost = 0;
+            for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
+                if (slots_[lane] != nullptr) { continue; }
+                ensure_lane_plan(request, lane);
+                const std::uint32_t cost = instance_.program->retained_lane_depth(lane);
+                if (instance_.program->can_admit_lane_after_retained_eviction(
+                        lane, *request->lane_plans[lane]) &&
+                    (!host_choice || cost < host_cost)) {
+                    host_choice = LaneChoice{
+                        .lane             = lane,
+                        .evict_retained   = true,
+                        .host_cache_entry = host_match->id,
+                    };
+                    host_cost = cost;
+                }
+            }
+            if (host_choice) { return host_choice; }
         }
         return selected;
     }
@@ -924,6 +1112,20 @@ private:
         if (!request->lane_plans[lane]) {
             throw std::logic_error("selected admission lane has no request plan");
         }
+        // Pin and materialize a host candidate before preserving other victims. The immutable
+        // manifest remains in the cache so branches share its blocks and a later incremental
+        // capture can reuse every unchanged full page.
+        std::optional<targets::qwen3_6::RetainedSessionSnapshot> host_snapshot;
+        if (choice.host_cache_entry) {
+            if (!host_prefix_cache_.pin(*choice.host_cache_entry)) {
+                throw std::logic_error("selected host prefix cache entry disappeared");
+            }
+            host_snapshot = host_prefix_cache_.materialize(*choice.host_cache_entry);
+            if (!host_snapshot) {
+                (void)host_prefix_cache_.unpin(*choice.host_cache_entry);
+                throw std::logic_error("selected host prefix cache entry disappeared");
+            }
+        }
         if (choice.evict_retained) {
             for (std::uint32_t retained_lane = 0;
                  retained_lane < max_concurrency_ &&
@@ -937,8 +1139,51 @@ private:
                     invalidate_lane_plans(retained_lane);
                 }
             }
-            if (!instance_.program->can_admit_lane(lane, *request->lane_plans[lane])) {
+            if (!choice.host_cache_entry &&
+                !instance_.program->can_admit_lane(lane, *request->lane_plans[lane])) {
                 throw std::logic_error("retained eviction did not make admission feasible");
+            }
+        }
+
+        if (choice.host_cache_entry) {
+            if (instance_.program->has_retained_lane(lane)) {
+                spill_retained_lane(lane);
+                lane_session_path_[lane].clear();
+                instance_.program->evict_retained_lane(lane);
+                invalidate_lane_plans(lane);
+            }
+            const std::size_t restore_bytes = host_snapshot->bytes.size();
+            const auto restore_started      = Clock::now();
+            try {
+                (void)instance_.program->restore_retained_lane(
+                    lane,
+                    std::span<const std::uint8_t>(host_snapshot->bytes.data(),
+                                                  host_snapshot->bytes.size()),
+                    host_prefix_cache_model_binding_);
+                invalidate_lane_plans(lane);
+                request->lane_plans[lane].reset();
+                ensure_lane_plan(request, lane);
+                if (request->lane_plans[lane]->summary().reusable_prompt_tokens == 0 ||
+                    !instance_.program->can_admit_lane(lane, *request->lane_plans[lane])) {
+                    throw std::logic_error(
+                        "restored host prefix did not produce an admissible hit");
+                }
+                ++cumulative_stats_.host_prefix_cache_hits;
+                lane_host_cache_entry_[lane] = *choice.host_cache_entry;
+                cumulative_stats_.host_prefix_cache_restore_bytes += restore_bytes;
+                cumulative_stats_.host_prefix_cache_restore_seconds +=
+                    std::chrono::duration<double>(Clock::now() - restore_started).count();
+            } catch (...) {
+                ++cumulative_stats_.host_prefix_cache_restore_failures;
+                cumulative_stats_.host_prefix_cache_restore_seconds +=
+                    std::chrono::duration<double>(Clock::now() - restore_started).count();
+                if (instance_.program->has_retained_lane(lane)) {
+                    instance_.program->evict_retained_lane(lane);
+                    invalidate_lane_plans(lane);
+                }
+                (void)host_prefix_cache_.unpin(*choice.host_cache_entry);
+                lane_host_cache_entry_[lane].reset();
+                throw;
             }
         }
 
@@ -948,6 +1193,17 @@ private:
         release_planning_state(request);
 
         const RequestPlanSummary summary = selected_plan.summary();
+        if (request->affinity_contended) {
+            if (request->affinity_continuation) {
+                if (affinity_burst_used_ != std::numeric_limits<std::uint32_t>::max()) {
+                    ++affinity_burst_used_;
+                }
+            } else {
+                affinity_lane_.reset();
+                affinity_burst_used_ = 0;
+            }
+            affinity_grace_deadline_.reset();
+        }
         if (backfill_class == BackfillClass::Temporal) {
             if (!protection_ || protection_->epoch_id != backfill_epoch ||
                 summary.service_work_quanta > protection_->temporal_credit) {
@@ -957,11 +1213,21 @@ private:
         }
         clear_protection_if_head(request);
 
-        // Zero reuse means the target takes the FullReset path and destroys whatever session
-        // the lane retained. Spill it first, and start the new session unbound either way so a
-        // later eviction can never write it over the previous session's file.
-        if (summary.reusable_prompt_tokens == 0) {
-            spill_retained_lane(lane);
+        if (!choice.host_cache_entry && lane_host_cache_entry_[lane] &&
+            summary.reusable_prompt_tokens != 0) {
+            (void)host_prefix_cache_.recall(*lane_host_cache_entry_[lane]);
+        }
+
+        // Full reset and checkpoint restore both destroy the lane's current continuation. Preserve
+        // that branch before the target truncates in place; otherwise two sessions which share an
+        // older turn checkpoint repeatedly re-prefill the entire divergent suffix without ever
+        // crossing the ordinary eviction sink.
+        const bool destructive_reuse =
+            summary.prefix_reuse_path == PrefixReusePath::FullReset ||
+            summary.prefix_reuse_path == PrefixReusePath::RestoreTurnCheckpoint;
+        if (destructive_reuse) { spill_retained_lane(lane); }
+        // A full reset starts an unrelated session, so it must not inherit a slot-file binding.
+        if (summary.prefix_reuse_path == PrefixReusePath::FullReset) {
             lane_session_path_[lane].clear();
         }
 
@@ -1007,6 +1273,7 @@ private:
                 prefill_lane_.reset();
             }
             slots_[lane].reset();
+            if (!instance_.program->has_retained_lane(lane)) { release_lane_host_entry(lane); }
             invalidate_lane_plans(lane);
             complete_error(request, error);
             throw;
@@ -1017,12 +1284,13 @@ private:
     AdmissionProgress try_admit_one() {
         bool control_progress = false;
         for (;;) {
-            const std::vector<std::shared_ptr<Request>> queued = pending_snapshot();
+            std::vector<std::shared_ptr<Request>> queued = pending_snapshot();
             if (queued.empty()) {
                 protection_.reset();
                 return control_progress ? AdmissionProgress::ControlProgress
                                         : AdmissionProgress::None;
             }
+            if (apply_affinity_order(queued)) { return AdmissionProgress::AffinityWait; }
             const std::shared_ptr<Request>& head = queued.front();
             if (protection_ && protection_->head_request_id != head->id) { protection_.reset(); }
             if (head->cancelled.load(std::memory_order_acquire)) {
@@ -1261,6 +1529,7 @@ private:
                 complete_error(slots_[lane], error);
                 slots_[lane].reset();
             }
+            release_lane_host_entry(lane);
         }
         for (const auto& request : pending) { complete_error(request, error); }
         publish_runtime_stats();
@@ -1289,7 +1558,7 @@ private:
             }
 
             try {
-                std::scoped_lock execution_lock(execution_mutex_);
+                std::unique_lock execution_lock(execution_mutex_);
                 const bool have_pending          = expire_pending_requests();
                 const auto cancelled_at_boundary = snapshot_cancellations();
                 cancel_active_requests(cancelled_at_boundary);
@@ -1315,6 +1584,13 @@ private:
                     if (progress == AdmissionProgress::ControlProgress && membership.empty()) {
                         continue;
                     }
+                    if (progress == AdmissionProgress::AffinityWait && membership.empty()) {
+                        const auto deadline = affinity_grace_deadline_.value_or(Clock::now());
+                        execution_lock.unlock();
+                        std::unique_lock queue_lock(queue_mutex_);
+                        queue_cv_.wait_until(queue_lock, deadline);
+                        continue;
+                    }
                 }
 
                 if (!membership.empty()) {
@@ -1334,6 +1610,9 @@ private:
     const std::size_t max_outstanding_;
     const std::chrono::milliseconds pending_timeout_;
     const bool auto_save_evicted_;
+    HostCache host_prefix_cache_;
+    const std::uint32_t kv_affinity_burst_;
+    const std::chrono::milliseconds kv_affinity_grace_;
     const AdmissionResources admission_capacity_;
 
     mutable std::mutex execution_mutex_;
@@ -1348,6 +1627,9 @@ private:
     std::array<std::uint64_t, kMaximumConcurrency> lane_plan_versions_{};
     std::optional<AdmissionProtection> protection_;
     std::uint64_t next_protection_epoch_ = 1;
+    std::optional<std::uint32_t> affinity_lane_;
+    std::uint32_t affinity_burst_used_ = 0;
+    std::optional<Clock::time_point> affinity_grace_deadline_;
     RuntimeStats cumulative_stats_;
     RuntimeStats published_stats_;
     std::vector<SlotState> published_slots_;
@@ -1358,7 +1640,11 @@ private:
     // Slot file each lane's resident session was last saved to or restored from; empty means
     // unbound. Guarded by execution_mutex_ like the lane state it describes.
     std::array<std::string, kMaximumConcurrency> lane_session_path_{};
+    // Immutable host manifest supplying the resident lane's unchanged prefix blocks. It remains
+    // pinned until the lane is destroyed or destructively rewound.
+    std::array<std::optional<HostEntryId>, kMaximumConcurrency> lane_host_cache_entry_{};
     std::string eviction_model_binding_;
+    std::string host_prefix_cache_model_binding_;
     std::function<void(std::string, targets::qwen3_6::RetainedSessionSnapshot&&)> eviction_sink_;
     bool stopping_ = false;
     bool failed_   = false;

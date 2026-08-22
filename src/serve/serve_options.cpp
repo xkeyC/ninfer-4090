@@ -70,11 +70,14 @@ std::string serve_usage_text(const char* argv0) {
            " <model.ninfer> [--host H] [--port N] [--api-key KEY] "
            "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
            "[--max-pending-requests N] [--pending-timeout-ms N] "
-           "[--prefill-chunk N] [--turn-checkpoints N] [--log-stats-interval-ms N] [--device N] "
+           "[--prefill-chunk N] [--turn-checkpoints N] [--host-prefix-cache-mib N] "
+           "[--kv-affinity-burst N] [--kv-affinity-grace-ms N] "
+           "[--log-stats-interval-ms N] [--device N] "
            "[--max-request-mib N] [--request-log-jsonl FILE] [--slot-save-path DIR] "
            "[--auto-save-evicted] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
-           "[--kv-dtype bf16|int8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8] [--spec mtp|dflash --draft-tokens N] "
+           "[--kv-dtype bf16|int8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8] [--spec mtp|dflash --draft-tokens "
+           "N] "
            "[--default-max-tokens N] "
            "[--vision] [--vision-max-tokens N] [--no-cuda-graph] [--no-prefix-reuse] "
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] [--cors] "
@@ -92,6 +95,13 @@ std::string serve_usage_text(const char* argv0) {
            "       --turn-checkpoints retains N host turn checkpoints per slot so a prompt "
            "that diverges mid-history re-prefills from the nearest checkpoint instead of from "
            "zero (0 disables; each entry holds the full GDN state image in host memory)\n"
+           "       --host-prefix-cache-mib keeps involuntarily evicted complete sessions in a "
+           "byte-bounded shared host block cache and restores matching prompts automatically "
+           "(0 disables)\n"
+           "       --kv-affinity-burst defaults to 5 matching admissions before rotating to an "
+           "older competing session; 0 disables affinity scheduling\n"
+           "       --kv-affinity-grace-ms defaults to 1500 so the resident conversation can "
+           "submit its next turn before an expensive KV owner switch\n"
            "       --auto-save-evicted spills an involuntarily evicted session back to the "
            "slot file it was last saved to or restored from, before the eviction destroys it "
            "(requires --slot-save-path; explicit erase never auto-saves)\n"
@@ -170,6 +180,19 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--turn-checkpoints") {
             options.turn_checkpoint_ring = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--turn-checkpoints"), "turn-checkpoints"));
+        } else if (arg == "--host-prefix-cache-mib") {
+            const std::uint64_t mib =
+                parse_u64(require_value("--host-prefix-cache-mib"), "host-prefix-cache-mib");
+            if (mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument("--host-prefix-cache-mib is out of range");
+            }
+            options.host_prefix_cache_bytes = static_cast<std::size_t>(mib << 20);
+        } else if (arg == "--kv-affinity-burst") {
+            options.kv_affinity_burst = static_cast<std::uint32_t>(parse_nonnegative_int(
+                require_value("--kv-affinity-burst"), "kv-affinity-burst"));
+        } else if (arg == "--kv-affinity-grace-ms") {
+            options.kv_affinity_grace_ms = static_cast<std::uint32_t>(parse_nonnegative_int(
+                require_value("--kv-affinity-grace-ms"), "kv-affinity-grace-ms"));
         } else if (arg == "--auto-save-evicted") {
             options.auto_save_evicted = true;
         } else if (arg == "--log-stats-interval-ms") {
@@ -224,9 +247,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.enable_vision = true;
         } else if (arg == "--vision-max-tokens" || arg == "--vision-limit") {
             const int val = parse_nonnegative_int(require_value(arg.c_str()), "vision-max-tokens");
-            if (val <= 0) {
-                throw std::invalid_argument(std::string(arg) + " must be positive");
-            }
+            if (val <= 0) { throw std::invalid_argument(std::string(arg) + " must be positive"); }
             options.vision_max_tokens = static_cast<std::uint32_t>(val);
             options.enable_vision     = true;
         } else if (arg == "--no-cuda-graph") {
@@ -290,6 +311,12 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     if (options.pending_timeout_ms == 0) {
         throw std::invalid_argument("--pending-timeout-ms must be positive");
     }
+    if (options.kv_affinity_burst > 1024) {
+        throw std::invalid_argument("--kv-affinity-burst must be in [0,1024]");
+    }
+    if (options.kv_affinity_grace_ms > 60000) {
+        throw std::invalid_argument("--kv-affinity-grace-ms must be in [0,60000]");
+    }
     if (options.max_request_bytes == 0) {
         throw std::invalid_argument("--max-request-mib must be positive");
     }
@@ -299,6 +326,14 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     product::validate_speculative_cli_options(options.speculative);
     if (options.speculative.backend == SpeculativeBackend::DFlash && options.enable_vision) {
         throw std::invalid_argument("--spec dflash cannot be combined with --vision");
+    }
+    if (options.speculative.backend == SpeculativeBackend::DFlash &&
+        options.host_prefix_cache_bytes != 0) {
+        throw std::invalid_argument("--host-prefix-cache-mib does not support --spec dflash");
+    }
+    if (!options.allow_prefix_reuse && options.host_prefix_cache_bytes != 0) {
+        throw std::invalid_argument(
+            "--host-prefix-cache-mib cannot be combined with --no-prefix-reuse");
     }
     if (default_max_tokens_explicit) {
         if (options.default_max_tokens <= 0) {

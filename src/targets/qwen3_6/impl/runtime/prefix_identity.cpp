@@ -166,6 +166,37 @@ bool ResidentPrefixIdentity::matches(const PreparedPromptData& prompt, std::size
     return true;
 }
 
+bool ResidentPrefixIdentity::matches(
+    const std::vector<std::uint8_t>& token_types,
+    const std::array<std::vector<std::int32_t>, 3>& positions,
+    const std::vector<VisionItem>& vision_items, std::size_t count) const {
+    if (count > size() || token_types.size() != count) { return false; }
+    for (const auto& axis : positions) {
+        if (axis.size() != count) { return false; }
+    }
+    if (!std::equal(token_types.begin(), token_types.end(), token_types_.begin())) {
+        return false;
+    }
+    for (std::size_t axis = 0; axis < positions_.size(); ++axis) {
+        if (!std::equal(positions[axis].begin(), positions[axis].end(),
+                        positions_[axis].begin())) {
+            return false;
+        }
+    }
+
+    std::size_t incoming_items = 0;
+    std::size_t resident_items = 0;
+    if (!prefix_item_count(vision_items, count, &incoming_items) ||
+        !prefix_item_count(vision_items_, count, &resident_items) ||
+        incoming_items != vision_items.size() || incoming_items != resident_items) {
+        return false;
+    }
+    for (std::size_t i = 0; i < incoming_items; ++i) {
+        if (!same_item(vision_items[i], vision_items_[i])) { return false; }
+    }
+    return true;
+}
+
 bool prefix_matches(const PreparedPromptData& prompt, const std::vector<TokenId>& resident_tokens,
                     const ResidentPrefixIdentity& resident_identity, std::size_t count) {
     if (count > prompt.token_ids.size() || count > resident_tokens.size()) { return false; }
@@ -173,6 +204,49 @@ bool prefix_matches(const PreparedPromptData& prompt, const std::vector<TokenId>
                       prompt.token_ids.begin() + static_cast<std::ptrdiff_t>(count),
                       resident_tokens.begin()) &&
            resident_identity.matches(prompt, count);
+}
+
+bool prefix_matches(const PreparedPromptData& prompt, const std::vector<TokenId>& resident_tokens,
+                    const std::vector<std::uint8_t>& resident_token_types,
+                    const std::array<std::vector<std::int32_t>, 3>& resident_positions,
+                    const std::vector<VisionItem>& resident_vision_items, std::size_t count) {
+    const std::size_t prompt_tokens = prompt.token_ids.size();
+    if (count > prompt_tokens || count > resident_tokens.size() ||
+        count > resident_token_types.size() || prompt.token_types.size() != prompt_tokens ||
+        prompt.positions.size() != 3 * prompt_tokens) {
+        return false;
+    }
+    for (const auto& axis : resident_positions) {
+        if (count > axis.size()) { return false; }
+    }
+    if (!std::equal(prompt.token_ids.begin(),
+                    prompt.token_ids.begin() + static_cast<std::ptrdiff_t>(count),
+                    resident_tokens.begin()) ||
+        !std::equal(prompt.token_types.begin(),
+                    prompt.token_types.begin() + static_cast<std::ptrdiff_t>(count),
+                    resident_token_types.begin())) {
+        return false;
+    }
+    for (std::size_t axis = 0; axis < resident_positions.size(); ++axis) {
+        const auto begin =
+            prompt.positions.begin() + static_cast<std::ptrdiff_t>(axis * prompt_tokens);
+        if (!std::equal(begin, begin + static_cast<std::ptrdiff_t>(count),
+                        resident_positions[axis].begin())) {
+            return false;
+        }
+    }
+
+    std::size_t incoming_items = 0;
+    std::size_t resident_items = 0;
+    if (!prefix_item_count(prompt.vision_items, count, &incoming_items) ||
+        !prefix_item_count(resident_vision_items, count, &resident_items) ||
+        incoming_items != resident_items) {
+        return false;
+    }
+    for (std::size_t i = 0; i < incoming_items; ++i) {
+        if (!same_item(prompt.vision_items[i], resident_vision_items[i])) { return false; }
+    }
+    return true;
 }
 
 } // namespace ninfer::targets::qwen3_6::detail

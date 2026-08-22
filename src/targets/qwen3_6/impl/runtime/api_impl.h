@@ -20,11 +20,13 @@ SequencePlan<Variant>::SequencePlan(
 template <>
 SequencePlan<Variant>::SequencePlan(SequencePlan&& other) noexcept
     : impl_(std::move(other.impl_)) {}
+
 template <>
 SequencePlan<Variant>& SequencePlan<Variant>::operator=(SequencePlan&& other) noexcept {
     impl_ = std::move(other.impl_);
     return *this;
 }
+
 template <>
 SequencePlan<Variant>::~SequencePlan() = default;
 
@@ -91,11 +93,13 @@ RequestBasePlan<Variant>::RequestBasePlan(
 template <>
 RequestBasePlan<Variant>::RequestBasePlan(RequestBasePlan&& other) noexcept
     : impl_(std::move(other.impl_)) {}
+
 template <>
 RequestBasePlan<Variant>& RequestBasePlan<Variant>::operator=(RequestBasePlan&& other) noexcept {
     impl_ = std::move(other.impl_);
     return *this;
 }
+
 template <>
 RequestBasePlan<Variant>::~RequestBasePlan() = default;
 
@@ -110,13 +114,14 @@ RequestPlan<Variant>::RequestPlan(std::unique_ptr<detail::RequestPlanImpl<Varian
     : impl_(std::move(impl)) {}
 
 template <>
-RequestPlan<Variant>::RequestPlan(RequestPlan&& other) noexcept
-    : impl_(std::move(other.impl_)) {}
+RequestPlan<Variant>::RequestPlan(RequestPlan&& other) noexcept : impl_(std::move(other.impl_)) {}
+
 template <>
 RequestPlan<Variant>& RequestPlan<Variant>::operator=(RequestPlan&& other) noexcept {
     impl_ = std::move(other.impl_);
     return *this;
 }
+
 template <>
 RequestPlan<Variant>::~RequestPlan() = default;
 
@@ -224,15 +229,23 @@ std::string Program<Variant>::retained_lane_digest(std::uint32_t lane) const {
 }
 
 template <>
-std::vector<SlotCheckpoint>
-Program<Variant>::retained_lane_checkpoints(std::uint32_t lane) const {
+std::vector<SlotCheckpoint> Program<Variant>::retained_lane_checkpoints(std::uint32_t lane) const {
     return impl_->retained_lane_checkpoints(lane);
 }
 
 template <>
 RetainedSessionSnapshot Program<Variant>::save_retained_lane(std::uint32_t lane,
-                                                             std::string_view model_binding) {
-    return impl_->save_retained_lane(lane, model_binding);
+                                                             std::string_view model_binding,
+                                                             std::span<const std::uint8_t> base_snapshot) {
+    return impl_->save_retained_lane(lane, model_binding, base_snapshot);
+}
+
+template <>
+std::uint32_t Program<Variant>::reusable_snapshot_prefix(const RetainedSessionSnapshot& snapshot,
+                                                         const PreparedPrompt& prompt,
+                                                         bool allow_prefix_reuse) const {
+    return impl_->reusable_snapshot_prefix(snapshot, PreparedPromptAccess::view(prompt),
+                                           allow_prefix_reuse);
 }
 
 template <>

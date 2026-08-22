@@ -138,6 +138,15 @@ slot file are not covered, and an explicit `erase` never auto-saves. The device
 snapshot runs on the eviction path and costs a few hundred milliseconds; the
 file write runs on a background thread. Requires `--slot-save-path`.
 
+`--host-prefix-cache-mib N` closes the same residency gap without client cooperation or disk. The
+complete snapshot, including each cumulative ring checkpoint, becomes a manifest in a byte-bounded
+process-local block store. Identical KV/checkpoint blocks are shared across branches, and recall
+time/frequency control block eviction. A later compatible prompt restores the manifest
+automatically. The controls remain orthogonal: the block cache preserves a session across lane
+eviction, while this ring determines which GDN frontiers are semantically restorable after a
+mid-history edit. Append-only workloads can use a zero or small ring; edit-heavy workloads should
+budget both the KV blocks and cumulative checkpoint entries.
+
 ## Limits
 
 - The DFlash backend is not supported. Its cyclic local cache mirrors only the

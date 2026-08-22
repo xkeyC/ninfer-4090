@@ -100,6 +100,34 @@ save. Sessions never saved or restored have no binding and are not spilled; an e
 `erase` is a deletion request and never auto-saves. The console reports each spill as
 `slot auto-save file=... n_saved=...`.
 
+`--host-prefix-cache-mib N` is the client-independent, process-local eviction path. Before an
+involuntary eviction releases a retained lane, the Engine captures its complete continuation into
+a host-memory block store bounded by `N` MiB. A logical manifest references immutable metadata,
+GDN state/checkpoint, and 64-token KV page-group blocks; byte-identical blocks are stored once
+across branches. Each block records recall count and last-recall time. When full, the cache first
+selects the coldest unpinned block by recency plus a logarithmic frequency bonus, then atomically
+removes its dependent unpinned manifests. A manifest remains in the cache while its image is also
+restored into a lane, and a later capture transfers only new/changed device blocks when that image
+is still available.
+
+Admission searches cached manifests together with resident lanes; a deeper compatible hit is
+restored automatically and only the new prompt suffix is prefilled. No `/slots` call, filename,
+or file binding is involved. Restart loses the cache. The DFlash backend is not supported.
+`--no-prefix-reuse` is incompatible because host admission uses the same exact-prefix contract.
+Large snapshots remain pageable cache memory; save and restore pass through a fixed 128 MiB
+double-buffered pinned staging area, so enabling a multi-GiB cache does not pin that budget. The
+`ninfer:host_prefix_cache_{capture,restore}_{bytes,seconds}_total` metrics expose transfer volume
+and wall time separately; matching failure counters use the same capture/restore prefixes. Live
+gauges distinguish logical manifests (`entries`), unique blocks (`blocks`), and accounted bytes.
+
+When the host cache is enabled, KV-affinity admission reduces avoidable owner switches.
+`--kv-affinity-burst N` permits a queued request matching resident KV to pass older cold work for
+up to `N` contended admissions (default `5`), then rotates to the oldest competing conversation.
+The bound is an admission fairness budget, not a forced delay: it is consulted only when both a
+resident match and a competitor exist. `--kv-affinity-grace-ms N` (default `1500`) lets admission
+briefly wait for the current conversation's next turn before paying a multi-GiB spill/restore.
+Set the burst to `0` to disable affinity scheduling.
+
 ## OpenAI Chat Completions
 
 ```bash
@@ -476,6 +504,9 @@ curl http://127.0.0.1:8080/v1/models \
 | `--request-log-jsonl FILE` | append full-precision server/request records | disabled |
 | `--slot-save-path DIR` | enable `/slots/{id}?action=save\|restore\|erase` session persistence into DIR | disabled |
 | `--turn-checkpoints N` | retained turn checkpoints per slot for mid-history prompt reuse; see [turn-checkpoint-ring.md](turn-checkpoint-ring.md) | `0` |
+| `--host-prefix-cache-mib N` | process-local deduplicated host-RAM block cache for automatically restoring involuntarily evicted sessions; DFlash unsupported | `0` |
+| `--kv-affinity-burst N` | maximum contended resident-KV admissions before rotating to the oldest competing conversation; `0` disables | `5` |
+| `--kv-affinity-grace-ms N` | time to wait for the resident conversation's next turn before switching KV owner | `1500` |
 | `--auto-save-evicted` | spill an involuntarily evicted session back to its bound slot file; requires `--slot-save-path` | off |
 | `--response-store-max-records N` | maximum locally retained Responses objects | `1024` |
 | `--response-store-max-mib N` | total local Response envelope/Item/context budget | `256` |

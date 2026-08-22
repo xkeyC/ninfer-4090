@@ -178,15 +178,15 @@ void test_vision_control() {
     prompt.prepare.vision_tokens = 3;
     prompt.vision_items          = {
         q36::VisionItem{.modality    = q36::PromptModality::Image,
-                                 .grid        = {.temporal = 1, .height = 2, .width = 2},
-                                 .patch_begin = 0,
-                                 .patch_count = 4,
-                                 .token_spans = {{.begin = 1, .count = 1}}},
+                        .grid        = {.temporal = 1, .height = 2, .width = 2},
+                        .patch_begin = 0,
+                        .patch_count = 4,
+                        .token_spans = {{.begin = 1, .count = 1}}},
         q36::VisionItem{.modality    = q36::PromptModality::Video,
-                                 .grid        = {.temporal = 2, .height = 2, .width = 2},
-                                 .patch_begin = 4,
-                                 .patch_count = 8,
-                                 .token_spans = {{.begin = 3, .count = 1}, {.begin = 5, .count = 1}}},
+                        .grid        = {.temporal = 2, .height = 2, .width = 2},
+                        .patch_begin = 4,
+                        .patch_count = 8,
+                        .token_spans = {{.begin = 3, .count = 1}, {.begin = 5, .count = 1}}},
     };
 
     const q36::VisionControl control = q36::build_vision_control(prompt);
@@ -280,6 +280,26 @@ void test_prefix_identity() {
     ledger.resize(prompt_only.token_ids.size());
     expect(q36::detail::prefix_matches(prompt_only, ledger, resident, ledger.size()),
            "truncated multimodal continuation identity");
+
+    std::array<std::vector<std::int32_t>, 3> positions;
+    for (std::size_t axis = 0; axis < positions.size(); ++axis) {
+        const auto begin = prompt_only.positions.begin() +
+                           static_cast<std::ptrdiff_t>(axis * prompt_only.token_ids.size());
+        positions[axis].assign(begin,
+                               begin + static_cast<std::ptrdiff_t>(prompt_only.token_ids.size()));
+    }
+    expect(q36::detail::prefix_matches(prompt_only, ledger, prompt_only.token_types, positions,
+                                       prompt_only.vision_items, ledger.size()),
+           "snapshot-form prefix identity matches the represented prompt");
+    expect(resident.matches(prompt_only.token_types, positions, prompt_only.vision_items,
+                            ledger.size()),
+           "resident identity accepts an exact saved prefix");
+    expect(!resident.matches(prompt_only.token_types, positions, changed_media.vision_items,
+                             ledger.size()),
+           "resident identity rejects changed saved media");
+    expect(!q36::detail::prefix_matches(changed_media, ledger, prompt_only.token_types, positions,
+                                        prompt_only.vision_items, ledger.size()),
+           "snapshot-form identity rejects changed media");
 }
 
 } // namespace

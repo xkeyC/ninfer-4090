@@ -22,6 +22,7 @@ add_library(ninfer_core STATIC
   core/device.cu
   core/dtype.cpp
   core/gdn_replay_records.cpp
+  core/host_transfer.cpp
   core/cyclic_kv_cache.cpp
   core/paged_kv_cache.cpp
   core/linear_attention_state.cpp
