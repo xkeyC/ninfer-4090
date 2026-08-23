@@ -79,6 +79,7 @@ struct ProcessorOptions {
     double max_video_duration_seconds      = 600.0;
     std::size_t max_media_items            = 16;
     std::uint64_t max_raw_patches          = 131'072;
+    // Peak merged-token grid of one media item. Items execute sequentially in one workspace.
     std::uint64_t max_vision_tokens        = 32'768;
     std::uint64_t max_attention_pairs      = 128ULL * 1024ULL * 1024ULL;
     std::size_t max_prompt_tokens          = 32'768;

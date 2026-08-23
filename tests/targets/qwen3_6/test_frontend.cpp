@@ -608,6 +608,40 @@ int test_text_and_image_prepare(const Frontend& frontend) {
     return failures;
 }
 
+int test_automatic_vision_budget_compression() {
+    const Frontend frontend = FrontendFactory::create_component(resources(), true, 1);
+    ninfer::ChatMessage message;
+    message.role = "user";
+    for (int index = 0; index < 2; ++index) {
+        ninfer::MessagePart image;
+        image.kind              = ninfer::MessagePartKind::Media;
+        image.media.kind        = ninfer::MediaKind::Image;
+        image.media.bytes       = gradient_ppm();
+        image.media.media_type  = "image/x-portable-pixmap";
+        image.media.source_name = "inline-" + std::to_string(index) + ".ppm";
+        message.parts.push_back(std::move(image));
+    }
+    ninfer::PromptInput input;
+    input.messages.push_back(std::move(message));
+
+    auto prepared             = frontend.prepare(std::move(input));
+    const auto& prepared_data = FrontendFactory::inspect(prepared);
+    int failures = check(prepared_data.vision_items.size() == 2 &&
+                             prepared_data.prepare.vision_tokens == 2 &&
+                             prepared_data.prepare.raw_patches == 8,
+                         "images were not independently compressed into the Vision workspace");
+    failures += check(prepared_data.patches.size() == 8 * 1536,
+                      "compressed images produced the wrong patch payload size");
+    for (const auto& item : prepared_data.vision_items) {
+        failures += check(item.grid.temporal == 1 && item.grid.height == 2 &&
+                              item.grid.width == 2 && item.patch_count == 4 &&
+                              item.content_digest == kGradientDigest &&
+                              item.token_spans.size() == 1 && item.token_spans.front().count == 1,
+                          "compressed image identity or placeholder geometry is incorrect");
+    }
+    return failures;
+}
+
 int test_video_prepare(const Frontend& frontend) {
     ninfer::MessagePart video;
     video.kind              = ninfer::MessagePartKind::Media;
@@ -814,6 +848,7 @@ int main() {
     failures += test_turn_rewrite_trace();
     failures += test_official_resource_guards();
     failures += test_text_and_image_prepare(frontend);
+    failures += test_automatic_vision_budget_compression();
     failures += test_video_prepare(frontend);
     failures += test_cross_round_stop(frontend);
     failures += test_same_token_stop_priority(frontend);

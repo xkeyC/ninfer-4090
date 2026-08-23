@@ -123,9 +123,9 @@ green 84/84 suite on their side. Disposition per group:
   Cherry-picked clean. Their commit leaves the processor budget
   (`max_vision_tokens`, still 32768) out of sync with the shrunken workspace: a
   request with 8K-32K image tokens passes the budget check and reaches the
-  undersized encoder. This fork wires the budget to the same limit
-  (`fix(frontend)` follow-up commit), so the failure is a clean
-  `media_budget_exceeded`. With the port, `rk4v4-e8` serves the full native
+  undersized encoder. This fork wires the per-item budget to the same limit and automatically
+  downsizes aligned image/video grids while retaining separate aggregate processor safeguards.
+  Oversized physical minima fail cleanly as `media_budget_exceeded`. With the port, `rk4v4-e8` serves the full native
   262,144 context with `--vision` at 780 MiB slack - the 208K practical line and
   the vision-against-context tradeoff are gone.
 - **CUDA-graph allowance tightening (c85db47a): skipped.** They replace their old

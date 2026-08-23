@@ -212,6 +212,17 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 
 OpenAI image and video sources may be HTTP(S) URLs or base64 data URLs.
 
+`--vision-max-tokens` fixes the startup Vision workspace and the maximum aligned grid of each media
+item. Images and videos are encoded sequentially into that same workspace; the frontend
+automatically downsizes an oversized item on its 32-pixel grid before patch construction. The cap
+does not depend on the number of later media items, so extending a conversation does not retokenize
+earlier images. Original media bytes and float patches are released after their Vision work is
+consumed; the expanded prompt tokens, Text KV, and compact digest/grid/span identity remain part of
+the conversation until the client removes or summarizes that history. A compatible cached prefix
+skips Vision encoding for historical media.
+Media-count, aggregate raw-patch/attention-work, and total prompt limits remain separate processor
+safeguards for extreme multi-media histories.
+
 ## OpenAI Responses Core
 
 NInfer implements the typed-Item and semantic-event core of the OpenAI
@@ -529,6 +540,7 @@ curl http://127.0.0.1:8080/v1/models \
 | `--lm-head-draft` | optimized proposal head | off |
 | `--default-max-tokens N` | output limit when omitted by a request | `8192` |
 | `--vision` | enable media input and load Vision GPU allocations | off |
+| `--vision-max-tokens N` | reusable Vision workspace and maximum tokens per media item; oversized grids are automatically downsized | `8192` |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
 | `--no-prefix-reuse` | disable compatible-prefix caching | prefix reuse on |
 | `--no-thinking` | disable thinking by default | thinking on |

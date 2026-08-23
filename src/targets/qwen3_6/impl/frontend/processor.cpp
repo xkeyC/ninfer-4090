@@ -25,6 +25,8 @@ constexpr int kPatch                    = 16;
 constexpr int kTemporal                 = 2;
 constexpr int kMerge                    = 2;
 constexpr int kFactor                   = kPatch * kMerge;
+constexpr std::uint64_t kPixelsPerVisionToken =
+    static_cast<std::uint64_t>(kFactor) * kFactor;
 constexpr int kPatchFeatures            = 3 * kTemporal * kPatch * kPatch;
 constexpr int kImageToken               = 248056;
 constexpr int kVideoToken               = 248057;
@@ -102,6 +104,51 @@ Size smart_resize_video(int frames, int height, int width, std::uint64_t min_pix
         w                 = static_cast<int>(std::ceil(width * beta / kFactor)) * kFactor;
     }
     return {h, w};
+}
+
+Size fit_vision_token_budget(Size size, int source_height, int source_width,
+                             std::uint64_t temporal, std::uint64_t token_budget) {
+    if (size.h < kFactor || size.w < kFactor || size.h % kFactor != 0 ||
+        size.w % kFactor != 0 || source_height <= 0 || source_width <= 0 || temporal == 0 ||
+        token_budget < temporal) {
+        throw std::invalid_argument("invalid adaptive vision resize budget");
+    }
+    std::uint64_t h = static_cast<std::uint64_t>(size.h / kFactor);
+    std::uint64_t w = static_cast<std::uint64_t>(size.w / kFactor);
+    const double source_ratio = static_cast<double>(source_height) / source_width;
+    while (temporal * h * w > token_budget) {
+        const double reduce_h_error =
+            h > 1 ? std::abs(std::log((static_cast<double>(h - 1) / w) / source_ratio))
+                  : std::numeric_limits<double>::infinity();
+        const double reduce_w_error =
+            w > 1 ? std::abs(std::log((static_cast<double>(h) / (w - 1)) / source_ratio))
+                  : std::numeric_limits<double>::infinity();
+        if (reduce_h_error == std::numeric_limits<double>::infinity() &&
+            reduce_w_error == std::numeric_limits<double>::infinity()) {
+            throw ProcessorError(ProcessorErrorKind::BudgetExceeded,
+                                 "media cannot fit vision token budget");
+        }
+        if (reduce_h_error <= reduce_w_error) {
+            --h;
+        } else {
+            --w;
+        }
+    }
+    return {static_cast<int>(h * kFactor), static_cast<int>(w * kFactor)};
+}
+
+std::uint64_t attention_token_cap(std::uint64_t attention_pairs) {
+    // A merged image token represents a 2x2 raw-patch tile. For one temporal grid the
+    // Vision attention cost is therefore 16 * tokens^2. Videos split the same token count
+    // over several temporal grids, so this image bound is conservative for both modalities.
+    const std::uint64_t square = attention_pairs / 16ULL;
+    std::uint64_t root = static_cast<std::uint64_t>(std::sqrt(static_cast<double>(square)));
+    while (root != 0 && root > square / root) { --root; }
+    while (root != std::numeric_limits<std::uint64_t>::max() &&
+           root + 1 <= square / (root + 1)) {
+        ++root;
+    }
+    return root;
 }
 
 double cubic(double x) {
@@ -224,10 +271,15 @@ void add_budget(PreprocessStats& stats, const VisionItem& item);
 void enforce_budget(const PreprocessStats& stats, const ProcessorOptions& options);
 
 Prepared prepare_image(const ChatPart& part, const ProcessorOptions& options,
-                       const media::decode::Policy& policy, PreprocessStats& stats) {
+                       const media::decode::Policy& policy, std::uint64_t token_budget,
+                       PreprocessStats& stats) {
     media::decode::Image image = media::decode::decode_image(part.media.bytes, policy);
-    const Size size = smart_resize_image(image.height, image.width, options.image_min_pixels,
-                                         options.image_max_pixels);
+    const std::uint64_t max_pixels =
+        std::min(options.image_max_pixels,
+                 checked_mul(token_budget, kPixelsPerVisionToken, "image token pixels"));
+    const std::uint64_t min_pixels = std::min(options.image_min_pixels, max_pixels);
+    Size size = smart_resize_image(image.height, image.width, min_pixels, max_pixels);
+    size = fit_vision_token_budget(size, image.height, image.width, 1, token_budget);
     const int gh    = size.h / kPatch;
     const int gw    = size.w / kPatch;
     Prepared out;
@@ -252,15 +304,29 @@ Prepared prepare_image(const ChatPart& part, const ProcessorOptions& options,
 }
 
 Prepared prepare_video(const ChatPart& part, const ProcessorOptions& options,
-                       const media::decode::Policy& policy, PreprocessStats& stats) {
+                       const media::decode::Policy& policy, std::uint64_t token_budget,
+                       PreprocessStats& stats) {
+    const std::uint64_t frame_budget =
+        std::min<std::uint64_t>(options.video_max_frames,
+                                checked_mul(token_budget, kTemporal, "video token frames"));
+    if (frame_budget < static_cast<std::uint64_t>(options.video_min_frames)) {
+        throw ProcessorError(ProcessorErrorKind::BudgetExceeded,
+                             "video cannot fit minimum vision token budget");
+    }
     media::decode::Video video =
         media::decode::decode_video(part.media.bytes, policy, options.video_fps,
-                                    options.video_min_frames, options.video_max_frames);
-    const Size size =
+                                    options.video_min_frames, static_cast<int>(frame_budget));
+    const std::uint64_t max_pixels =
+        std::min(options.video_max_pixels,
+                 checked_mul(token_budget, kPixelsPerVisionToken, "video token pixels"));
+    const std::uint64_t min_pixels = std::min(options.video_min_pixels, max_pixels);
+    Size size =
         smart_resize_video(static_cast<int>(video.frames.size()), video.height, video.width,
-                           options.video_min_pixels, options.video_max_pixels);
+                           min_pixels, max_pixels);
     const bool pad_temporal = video.frames.size() % kTemporal != 0;
     const int gt            = static_cast<int>((video.frames.size() + kTemporal - 1) / kTemporal);
+    size = fit_vision_token_budget(size, video.height, video.width,
+                                   static_cast<std::uint64_t>(gt), token_budget);
     const int gh            = size.h / kPatch;
     const int gw            = size.w / kPatch;
     Prepared out;
@@ -399,10 +465,6 @@ void enforce_budget(const PreprocessStats& stats, const ProcessorOptions& option
     if (stats.raw_patches > options.max_raw_patches) {
         throw ProcessorError(ProcessorErrorKind::BudgetExceeded,
                              "vision raw patches exceed processor budget");
-    }
-    if (stats.vision_tokens > options.max_vision_tokens) {
-        throw ProcessorError(ProcessorErrorKind::BudgetExceeded,
-                             "vision tokens exceed processor budget");
     }
     if (stats.attention_pairs > options.max_attention_pairs) {
         throw ProcessorError(ProcessorErrorKind::BudgetExceeded,
@@ -552,7 +614,8 @@ Processor::Processor(const Tokenizer& tokenizer, const CompiledChatTemplate& cha
         options_.video_max_pixels < options_.video_min_pixels || !(options_.video_fps > 0.0) ||
         options_.video_min_frames <= 0 || options_.video_max_frames < options_.video_min_frames ||
         options_.max_video_source_frames < options_.video_max_frames ||
-        !(options_.max_video_duration_seconds > 0.0)) {
+        !(options_.max_video_duration_seconds > 0.0) || options_.max_raw_patches == 0 ||
+        options_.max_vision_tokens == 0 || options_.max_attention_pairs == 0) {
         throw std::invalid_argument("processor budgets must be positive");
     }
     validate_special_token(tokenizer_, kImagePad, kImageToken);
@@ -577,14 +640,25 @@ ProcessedInput Processor::process(const std::vector<ChatMessage>& messages,
     ProcessedInput output;
     std::vector<VisionItem> items;
     items.reserve(parts.size());
+    // Vision items are encoded one at a time into the same Program workspace. Cap each item
+    // independently so appending a later image never changes an earlier image's grid and cache
+    // identity. Raw-patch and attention-pair limits remain aggregate processor work budgets.
+    const std::uint64_t item_token_budget =
+        std::min({options_.max_vision_tokens,
+                  options_.max_raw_patches / static_cast<std::uint64_t>(kMerge * kMerge),
+                  attention_token_cap(options_.max_attention_pairs)});
+    if (!parts.empty() && item_token_budget == 0) {
+        throw ProcessorError(ProcessorErrorKind::BudgetExceeded,
+                             "media cannot fit processor vision budget");
+    }
     PreprocessStats stats;
     stats.media_items = parts.size();
     for (const ChatPart* part : parts) {
         Prepared media;
         try {
             media = part->kind == ChatPartKind::Image
-                        ? prepare_image(*part, options_, policy, stats)
-                        : prepare_video(*part, options_, policy, stats);
+                        ? prepare_image(*part, options_, policy, item_token_budget, stats)
+                        : prepare_video(*part, options_, policy, item_token_budget, stats);
         } catch (const media::decode::Error& error) {
             if (error.kind() == media::decode::ErrorKind::BudgetExceeded) {
                 throw ProcessorError(ProcessorErrorKind::BudgetExceeded, error.what());

@@ -280,13 +280,19 @@ docker run --rm --gpus all --publish 8080:8080 \
   --vision --preserve-thinking
 ```
 
-The scratchpad bounds the image tokens per request, not the conversation depth:
-a 51K-token conversation with an attached image completes normally. One
-1024x1024 image costs 1026 vision tokens, so the default fits about seven
-maximum-size images per request. The server rejects a request over the limit
-with `media_budget_exceeded` before the request reaches the encoder. For dense
-video workloads, raise the limit with `--vision-max-tokens`. Each additional
-1024 tokens of scratchpad costs about 62 MiB of VRAM.
+The scratchpad bounds one image/video item at a time; Vision items are encoded sequentially and
+reuse the same workspace. Before patch construction, the processor automatically downsizes every
+item whose aligned grid would exceed the limit. The cap is independent per item, so appending a new
+image never changes an earlier image's grid or invalidates an otherwise reusable cached prefix.
+Impossible items (for example, a video's mandatory temporal grids alone exceeding the limit) still
+fail as `media_budget_exceeded` before reaching the encoder. Each additional 1024 tokens of
+scratchpad costs about 62 MiB of VRAM. Independent aggregate safeguards for media count, retained
+raw patches, Vision attention work, and total prompt length still apply to extreme histories.
+
+Expanded media tokens remain ordinary prompt tokens and therefore continue to occupy context KV
+until the client removes or summarizes that history. The encoded bytes and float patch payload are
+transient: after Vision prefill only the token/KV state plus compact media identity metadata remain,
+and a compatible cached prefix skips Vision execution for historical images.
 
 ### The tradeoff
 
@@ -415,8 +421,9 @@ GCC 13, and CMake 3.28 or newer; the Docker image builds with CUDA 13.1.
   Method and measurements in [docs/udp-fork-comparison.md](docs/udp-fork-comparison.md).
 - **Configurable vision scratchpad (ported).** `--vision-max-tokens` comes from the same fork
   and sizes the vision encode workspace (default 8192 tokens, formerly hardcoded 32768). This
-  fork additionally wires the processor media budget to the same limit, so an over-limit
-  request fails as `media_budget_exceeded` instead of reaching an undersized encoder.
+  fork keeps the processor in lockstep and automatically fits each image/video grid into the
+  reusable per-item workspace. Physical per-item minima and the separate aggregate processor
+  safeguards still report `media_budget_exceeded` when exceeded.
 
 ## Known limits on the RTX 4090
 
