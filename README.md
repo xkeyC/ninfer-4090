@@ -34,6 +34,54 @@ short window to submit its next turn before paying a multi-GiB owner switch.
 An RTX 4090 capacity test with three 90K-token branches produced three logical manifests backed by
 2,909 unique blocks using 2.67 GB of host RAM. A resident continuation completed in 1.68 seconds;
 an evicted 90K branch restored and answered in 10.27 seconds, with no capture or restore failures.
+
+### Four-Agent gradual 200K rotation
+
+The long-run cache test on 2026-08-23 used Qwen3.8-27B-Uncensored with `rk4v4-e8`, MTP3, a
+253,952-token shared KV pool, two lanes, a 20 GiB host cache, affinity burst 5, and 1500 ms grace.
+Four independent Agent histories ran sequential round-robin. Each started at 1,389 tokens, returned
+the complete assistant content, reasoning, and tool calls, then added about 1,065–1,097 tokens of
+tool/workspace state per turn. An Agent left the rotation only after its measured prompt reached
+200K. The run completed 627 requests over 166 rounds in 63.70 minutes. A separate server restart
+then measured a true empty-cache 200,037-token request as the cold baseline.
+
+| 200K request | Prompt | Cached | Hit rate | Queue | Host restore | TTFT | TTFT vs cold |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Empty-cache baseline | 200,037 | 0 | 0.00% | 0.000 s | 0 s | 149.951 s | 1.00× |
+| Agent 0, resident | 200,900 | 199,803 | 99.45% | 0.002 s | 0 s | 1.800 s | 83.33× |
+| Agent 1, restored | 201,127 | 194,074 | 96.49% | 1.064 s | 0.410 s | 10.627 s | 14.11× |
+| Agent 2, restored | 200,128 | 196,479 | 98.18% | 1.043 s | 0.434 s | 6.890 s | 21.76× |
+| Agent 3, restored | 200,766 | 199,669 | 99.45% | 1.047 s | 0.458 s | 4.363 s | 34.37× |
+
+The median final TTFT was 4.363 seconds, 34.37× faster than the measured cold request. The full
+continuation population separates scheduling delay from data movement as follows; restore
+percentiles include only the 534 requests that actually transferred a Host entry, while resident
+requests report zero restore time.
+
+| Long-run metric | Result |
+|---|---:|
+| Continuations / weighted cache hit | 623 / 98.028% |
+| Recompute ≤1.5K | 500 / 623 (80.26%) |
+| Recompute 1.5K–10K | 118 / 623 (18.94%) |
+| Recompute 10K–50K | 4 / 623 (0.64%) |
+| Recompute >50K | 1 / 623 (0.16%) |
+| Continuations with zero cached tokens | 0 |
+| TTFT P50 / P95 | 3.884 s / 8.985 s |
+| Queue P50 / P95 | 1.332 s / 1.483 s |
+| Host restore P50 / P95 | 0.308 s / 0.479 s |
+| Host restore payload / effective bandwidth | 1.188 TB / 7.592 GB/s |
+| Captures / cumulative capture wall | 542 / 513.504 s |
+| Block/manifest evictions | 516 |
+| Cache drops / capture failures / restore failures | 0 / 0 / 0 |
+
+The old approximately 122K per-lane wall was crossed without a reset: 128,644- and 130,095-token
+requests reused 127,579 and 129,030 tokens. Once the 20 GiB budget filled, ordinary pressure caused
+temporary rollback by a few 1K turns and then rebuilt the deep frontier. One request at 137,352
+tokens retained only 8,439 tokens and took 89.881 seconds; this was the sole >50K rollback and the
+same Agent returned to a recent deep frontier on following turns. Queue P50 was over four times
+restore P50 in this deliberately strict alternation, and cumulative capture wall was the larger
+remaining cache data-path cost.
+
 See [Serving](docs/serving.md) for flags and metrics and
 [Concurrent inference architecture](docs/maintainer/concurrent-inference-architecture.md) for the
 ownership and fairness contracts.
