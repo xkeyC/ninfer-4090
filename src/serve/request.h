@@ -53,10 +53,12 @@ struct CompletionUsage {
     // llama.cpp-compatible `timings` block data, emitted so proxies like
     // llama-swap can derive per-request Prefill/Decode rates and draft stats.
     // has_timings gates emission; seconds values are wall-clock phase times.
-    bool has_timings          = false;
-    double prefill_seconds    = 0.0;
-    double decode_seconds     = 0.0;
-    double ttft_seconds       = 0.0;
+    bool has_timings              = false;
+    double prefill_seconds        = 0.0;
+    double decode_seconds         = 0.0;
+    double ttft_seconds           = 0.0;
+    double queue_seconds          = 0.0;
+    double host_restore_seconds = 0.0;
     std::int64_t cache_hit_tokens  = 0;
     std::uint64_t draft_tokens     = 0;
     std::uint64_t accepted_tokens  = 0;

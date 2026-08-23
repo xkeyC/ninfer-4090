@@ -23,12 +23,14 @@ struct RequestCapacity;
 struct MediaInputCapacity;
 
 struct GenerationMetrics {
-    double prepare_seconds = 0.0;
-    double ttft_seconds    = 0.0;
-    double vision_seconds  = 0.0;
-    double prefill_seconds = 0.0;
-    double decode_seconds  = 0.0;
-    double total_seconds   = 0.0;
+    double prepare_seconds      = 0.0;
+    double queue_seconds        = 0.0;
+    double host_restore_seconds = 0.0;
+    double ttft_seconds         = 0.0;
+    double vision_seconds       = 0.0;
+    double prefill_seconds      = 0.0;
+    double decode_seconds       = 0.0;
+    double total_seconds        = 0.0;
 
     SpeculativeBackend speculative_backend    = SpeculativeBackend::None;
     std::uint32_t speculative_draft_window    = 0;

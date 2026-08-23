@@ -471,9 +471,10 @@ blocks；相同块跨分支只保存一次。每个 block 记录 recall count/la
 `last_recall + 5min * floor(log2(1 + recall_count))` 选择最冷的 unpinned block，再原子移除所有依赖
 它的 unpinned manifests，不能留下缺中间块的 image。
 Host entry 不占 admission resources，不改变 active-priority eviction 或 completion guarantee；后续 prepared
-prompt 只有在 target 对完整 prefix identity 给出非零 reusable frontier 时才能 claim entry。Materialize
-不是 exclusive ownership transfer：manifest 在 lane 驻留期间保持 pinned/matchable；再次 spill 时以它为
-base，仅 D2H 新增/变化的 page/checkpoint，再把新 manifest 插回共享 block store。
+prompt 只有在 target 对完整 prefix identity 给出非零 reusable frontier 时才能 claim entry。Restore
+不是 exclusive ownership transfer：manifest 在 lane 驻留期间保持 pinned/matchable；target 直接消费
+immutable block spans，不先拼接完整 contiguous image。再次 spill 时以该 manifest 为 base，直接引用
+未变化的 BlockId，仅 D2H 新增/变化的 page/checkpoint，也不重新 hash 或 CPU-copy 旧前缀。
 恢复仍须在 boundary 取得完整 request entitlement，不能抢占 active request，也不能让 host cache 绕过
 protected-head accounting。
 

@@ -104,7 +104,9 @@ save. Sessions never saved or restored have no binding and are not spilled; an e
 involuntary eviction releases a retained lane, the Engine captures its complete continuation into
 a host-memory block store bounded by `N` MiB. A logical manifest references immutable metadata,
 GDN state/checkpoint, and 64-token KV page-group blocks; byte-identical blocks are stored once
-across branches. Each block records recall count and last-recall time. When full, the cache first
+across branches. Capture writes new page groups directly into block-major host storage, and restore
+streams immutable block spans through pinned staging without assembling a full contiguous image.
+Each block records recall count and last-recall time. When full, the cache first
 selects the coldest unpinned block by recency plus a logarithmic frequency bonus, then atomically
 removes its dependent unpinned manifests. A manifest remains in the cache while its image is also
 restored into a lane, and a later capture transfers only new/changed device blocks when that image
@@ -184,7 +186,9 @@ finish-reason chunk and `[DONE]`. When `stream_options.include_usage` is true, a
 `choices` chunk contains completed usage. Non-streaming usage and this final usage chunk expose
 the reused prefix as `prompt_tokens_details.cached_tokens`; `prompt_tokens` remains the complete
 rendered prompt size, including cached tokens. The llama.cpp-compatible `timings.cache_n` alias is
-also retained for existing metric consumers.
+also retained for existing metric consumers. `timings.queue_ms` measures Engine FIFO/admission
+waiting before a lane is selected; `timings.cache_restore_ms` measures only the Host-to-GPU prefix
+restore attributed to that request. Both are emitted as zero when the phase did not occur.
 
 ### Multimodal request
 
@@ -572,8 +576,9 @@ that server instance.
 | `request_error` | the resolved request configuration and generation error message |
 | `throughput` | interval token deltas and rates, scheduler occupancy, and decode-round batch statistics |
 
-`request_done.timings_seconds` contains `prepare`, `ttft`, `vision`, `prefill`, `decode`, and `total`
-as full-precision JSON numbers. Its `speculative` object contains `backend`, `draft_window`, `rounds`,
+`request_done.timings_seconds` contains `prepare`, `queue`, `host_restore`, `ttft`, `vision`,
+`prefill`, `decode`, and `total` as full-precision JSON numbers. Its `speculative` object contains
+`backend`, `draft_window`, `rounds`,
 `drafted_tokens`, `accepted_tokens`, `fallback_steps`, and `accepted_per_position`. Rates can be
 derived downstream from raw token counts and seconds instead of rounded stderr strings.
 

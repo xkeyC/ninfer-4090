@@ -488,6 +488,8 @@ void add_timings(Json& payload, const CompletionUsage& usage) {
         {"predicted_n", usage.completion_tokens},
         {"prompt_ms", usage.prefill_seconds * 1000.0},
         {"predicted_ms", usage.decode_seconds * 1000.0},
+        {"queue_ms", usage.queue_seconds * 1000.0},
+        {"cache_restore_ms", usage.host_restore_seconds * 1000.0},
     };
     if (usage.prefill_seconds > 0.0) {
         timings["prompt_per_second"] = usage.prompt_tokens / usage.prefill_seconds;

@@ -42,6 +42,22 @@ public:
         std::size_t inserted_bytes = 0;
     };
 
+    static constexpr std::size_t kNewBlock = std::numeric_limits<std::size_t>::max();
+
+    // One logical block in a delta image. A reused block names its index in `base`; a new block
+    // names a byte range in the supplied delta payload. The cache resolves reuse directly to its
+    // immutable BlockId, so unchanged pages are neither copied nor hashed again.
+    struct BlockSource {
+        std::size_t base_block_index = kNewBlock;
+        std::size_t delta_offset     = 0;
+        std::size_t bytes            = 0;
+    };
+
+    struct View {
+        const Image* image = nullptr;
+        std::vector<std::span<const std::uint8_t>> blocks;
+    };
+
     explicit HostPrefixCache(
         std::size_t capacity_bytes = 0,
         typename Clock::duration frequency_window = std::chrono::minutes(5)) noexcept
@@ -54,40 +70,86 @@ public:
     [[nodiscard]] std::size_t block_count() const noexcept { return blocks_.size(); }
 
     InsertResult insert(Image image) {
-        InsertResult result;
-        if (!enabled() || image.bytes.empty()) { return result; }
+        if (!enabled() || image.bytes.empty()) { return {}; }
 
         std::vector<std::uint8_t> source = std::move(image.bytes);
         std::vector<std::size_t> block_sizes = std::move(image.cache_block_sizes);
         if (block_sizes.empty()) { block_sizes.push_back(source.size()); }
+        std::vector<BlockSource> blocks;
+        blocks.reserve(block_sizes.size());
         std::size_t represented = 0;
         for (const std::size_t bytes : block_sizes) {
             if (bytes == 0 || represented > source.size() ||
                 bytes > source.size() - represented) {
-                return result;
+                return {};
             }
+            blocks.push_back(BlockSource{.delta_offset = represented, .bytes = bytes});
             represented += bytes;
         }
-        if (represented != source.size()) { return result; }
+        if (represented != source.size()) { return {}; }
+        return insert_delta(std::move(image), std::nullopt, std::move(source), blocks);
+    }
+
+    InsertResult insert_delta(Image image, std::optional<EntryId> base,
+                              std::vector<std::uint8_t> delta,
+                              std::span<const BlockSource> sources) {
+        InsertResult result;
+        if (!enabled() || sources.empty()) { return result; }
+
+        const Entry* base_entry = base ? find_entry(*base) : nullptr;
+        if (base && base_entry == nullptr) { return result; }
+        for (const BlockSource& source : sources) {
+            if (source.bytes == 0) { return result; }
+            if (source.base_block_index != kNewBlock) {
+                if (base_entry == nullptr || source.base_block_index >= base_entry->blocks.size()) {
+                    return result;
+                }
+            } else if (source.delta_offset > delta.size() ||
+                       source.bytes > delta.size() - source.delta_offset) {
+                return result;
+            }
+        }
 
         Entry entry;
         entry.id             = next_entry_id_++;
         entry.metadata_bytes = image.cache_metadata_bytes +
-                               block_sizes.size() * sizeof(BlockId) + sizeof(Entry);
+                               sources.size() * sizeof(BlockId) + sizeof(Entry);
         entry.image          = std::move(image);
-        entry.blocks.reserve(block_sizes.size());
+        entry.blocks.reserve(sources.size());
 
         const auto now = Clock::now();
-        std::size_t offset = 0;
-        for (const std::size_t bytes : block_sizes) {
-            const std::span<const std::uint8_t> payload(source.data() + offset, bytes);
-            entry.blocks.push_back(intern(payload, now, result.inserted_bytes));
-            offset += bytes;
+        for (const BlockSource& source : sources) {
+            if (source.base_block_index != kNewBlock) {
+                const BlockId id = base_entry->blocks[source.base_block_index];
+                ++blocks_.at(id).references;
+                entry.blocks.push_back(id);
+            } else {
+                const std::span<const std::uint8_t> payload(delta.data() + source.delta_offset,
+                                                            source.bytes);
+                entry.blocks.push_back(intern(payload, now, result.inserted_bytes));
+            }
         }
+        entry.unique_blocks = entry.blocks;
+        std::sort(entry.unique_blocks.begin(), entry.unique_blocks.end());
+        entry.unique_blocks.erase(
+            std::unique(entry.unique_blocks.begin(), entry.unique_blocks.end()),
+            entry.unique_blocks.end());
         used_bytes_ += entry.metadata_bytes;
         result.inserted_bytes += entry.metadata_bytes;
         const EntryId protected_entry = entry.id;
         entries_.push_front(std::move(entry));
+        for (const BlockId id : entries_.front().unique_blocks) {
+            blocks_.at(id).dependents.push_back(protected_entry);
+        }
+
+        std::size_t required = entries_.front().metadata_bytes;
+        for (const BlockId id : entries_.front().unique_blocks) {
+            required += blocks_.at(id).bytes.size();
+        }
+        if (required > capacity_bytes_) {
+            (void)erase_entry(protected_entry);
+            return result;
+        }
 
         while (used_bytes_ > capacity_bytes_) {
             const auto coldest = coldest_evictable_block(protected_entry);
@@ -103,6 +165,20 @@ public:
         return result;
     }
 
+    [[nodiscard]] std::optional<View> view(EntryId id, bool count_recall = true) {
+        Entry* entry = find_entry(id);
+        if (entry == nullptr) { return std::nullopt; }
+        if (count_recall) { recall_entry(*entry); }
+        View out;
+        out.image = &entry->image;
+        out.blocks.reserve(entry->blocks.size());
+        for (const BlockId id : entry->blocks) {
+            const Block& block = blocks_.at(id);
+            out.blocks.emplace_back(block.bytes.data(), block.bytes.size());
+        }
+        return out;
+    }
+
     template <class Matcher>
     [[nodiscard]] std::optional<Match> best_match(Matcher&& matcher) const {
         std::optional<Match> best;
@@ -113,24 +189,6 @@ public:
             }
         }
         return best;
-    }
-
-    [[nodiscard]] std::optional<Image> materialize(EntryId id, bool count_recall = true) {
-        Entry* entry = find_entry(id);
-        if (entry == nullptr) { return std::nullopt; }
-        if (count_recall) { recall_entry(*entry); }
-
-        Image image = entry->image;
-        std::size_t total = 0;
-        for (const BlockId block_id : entry->blocks) { total += blocks_.at(block_id).bytes.size(); }
-        image.bytes.reserve(total);
-        image.cache_block_sizes.reserve(entry->blocks.size());
-        for (const BlockId block_id : entry->blocks) {
-            const Block& block = blocks_.at(block_id);
-            image.bytes.insert(image.bytes.end(), block.bytes.begin(), block.bytes.end());
-            image.cache_block_sizes.push_back(block.bytes.size());
-        }
-        return image;
     }
 
     [[nodiscard]] bool recall(EntryId id) {
@@ -175,6 +233,7 @@ private:
         std::uint32_t pin_count  = 0;
         std::uint64_t recall_count = 0;
         typename Clock::time_point last_recall{};
+        std::vector<EntryId> dependents;
     };
 
     struct Entry {
@@ -183,6 +242,7 @@ private:
         std::uint32_t pin_count    = 0;
         Image image;
         std::vector<BlockId> blocks;
+        std::vector<BlockId> unique_blocks;
     };
 
     static std::uint64_t hash_bytes(std::span<const std::uint8_t> bytes) noexcept {
@@ -266,6 +326,13 @@ private:
             if (it->id != id || it->pin_count != 0) { continue; }
             const std::size_t before = used_bytes_;
             used_bytes_ -= it->metadata_bytes;
+            for (const BlockId block_id : it->unique_blocks) {
+                auto block = blocks_.find(block_id);
+                if (block == blocks_.end()) { continue; }
+                auto& dependents = block->second.dependents;
+                dependents.erase(std::remove(dependents.begin(), dependents.end(), id),
+                                 dependents.end());
+            }
             for (const BlockId block : it->blocks) { release_block_reference(block); }
             entries_.erase(it);
             return before - used_bytes_;
@@ -290,20 +357,15 @@ private:
         std::optional<BlockId> selected;
         typename Clock::time_point selected_heat{};
         for (const auto& [id, block] : blocks_) {
-            if (block.pin_count != 0) { continue; }
-            bool referenced = false;
-            bool protected_reference = false;
-            for (const Entry& entry : entries_) {
-                if (std::find(entry.blocks.begin(), entry.blocks.end(), id) == entry.blocks.end()) {
-                    continue;
-                }
-                referenced = true;
-                if (entry.pin_count != 0 || entry.id == protected_entry) {
-                    protected_reference = true;
+            bool has_evictable_dependent = false;
+            for (const EntryId dependent : block.dependents) {
+                const Entry* entry = find_entry(dependent);
+                if (entry != nullptr && dependent != protected_entry && entry->pin_count == 0) {
+                    has_evictable_dependent = true;
                     break;
                 }
             }
-            if (!referenced || protected_reference) { continue; }
+            if (!has_evictable_dependent) { continue; }
             const auto heat = effective_recall(block);
             if (!selected || heat < selected_heat ||
                 (heat == selected_heat && block.recall_count < blocks_.at(*selected).recall_count)) {
@@ -317,10 +379,12 @@ private:
     std::size_t evict_block_dependents(BlockId block, EntryId protected_entry,
                                        std::size_t& evicted_entries) noexcept {
         std::vector<EntryId> victims;
-        for (const Entry& entry : entries_) {
-            if (entry.id == protected_entry || entry.pin_count != 0) { continue; }
-            if (std::find(entry.blocks.begin(), entry.blocks.end(), block) != entry.blocks.end()) {
-                victims.push_back(entry.id);
+        const auto held = blocks_.find(block);
+        if (held == blocks_.end()) { return 0; }
+        for (const EntryId dependent : held->second.dependents) {
+            const Entry* entry = find_entry(dependent);
+            if (entry != nullptr && entry->id != protected_entry && entry->pin_count == 0) {
+                victims.push_back(entry->id);
             }
         }
         std::size_t bytes = 0;
@@ -346,10 +410,7 @@ private:
 
     template <class Fn>
     void for_each_unique_block(Entry& entry, Fn&& fn) {
-        std::vector<BlockId> unique = entry.blocks;
-        std::sort(unique.begin(), unique.end());
-        unique.erase(std::unique(unique.begin(), unique.end()), unique.end());
-        for (const BlockId id : unique) { fn(blocks_.at(id)); }
+        for (const BlockId id : entry.unique_blocks) { fn(blocks_.at(id)); }
     }
 
     Entry* find_entry(EntryId id) noexcept {

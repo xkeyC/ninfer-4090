@@ -38,10 +38,22 @@ void HostTransferStager::retire(Slot& slot) {
     if (!slot.pending) { return; }
     CUDA_CHECK(cudaEventSynchronize(slot.ready));
     if (direction_ == Direction::DeviceToHost) {
-        std::memcpy(slot.pageable_target, slot.buffer.data(), slot.copied_bytes);
+        if (slot.target_pitch == slot.row_bytes) {
+            std::memcpy(slot.pageable_target, slot.buffer.data(), slot.copied_bytes);
+        } else {
+            auto* target = static_cast<std::uint8_t*>(slot.pageable_target);
+            const auto* source = static_cast<const std::uint8_t*>(slot.buffer.data());
+            for (std::size_t row = 0; row < slot.rows; ++row) {
+                std::memcpy(target + row * slot.target_pitch, source + row * slot.row_bytes,
+                            slot.row_bytes);
+            }
+        }
     }
     slot.pageable_target = nullptr;
     slot.copied_bytes    = 0;
+    slot.target_pitch    = 0;
+    slot.row_bytes       = 0;
+    slot.rows            = 0;
     slot.pending         = false;
 }
 
@@ -58,6 +70,9 @@ void HostTransferStager::enqueue_device_to_host(void* host, const void* device, 
     CUDA_CHECK(cudaEventRecord(slot.ready, stream_));
     slot.pageable_target = host;
     slot.copied_bytes    = bytes;
+    slot.target_pitch    = bytes;
+    slot.row_bytes       = bytes;
+    slot.rows            = 1;
     slot.pending         = true;
 }
 
@@ -112,6 +127,9 @@ void HostTransferStager::enqueue_device_to_host_2d(void* host, const void* devic
     CUDA_CHECK(cudaEventRecord(slot.ready, stream_));
     slot.pageable_target = host;
     slot.copied_bytes    = width * height;
+    slot.target_pitch    = width;
+    slot.row_bytes       = width;
+    slot.rows            = height;
     slot.pending         = true;
 }
 
@@ -168,6 +186,75 @@ void HostTransferStager::host_to_device_2d(void* device, std::size_t device_pitc
         device_cursor += device_pitch * rows;
         host_cursor += width * rows;
         height -= rows;
+    }
+}
+
+void HostTransferStager::device_to_host_strided(void* host, std::size_t host_pitch,
+                                                const void* device, std::size_t row_bytes,
+                                                std::size_t rows) {
+    if (row_bytes == 0 || rows == 0) { return; }
+    if (host == nullptr || device == nullptr || host_pitch < row_bytes) {
+        throw std::invalid_argument("HostTransferStager strided destination is invalid");
+    }
+    if (row_bytes > buffer_bytes_) {
+        throw std::invalid_argument("HostTransferStager strided row exceeds its staging buffer");
+    }
+    set_direction(Direction::DeviceToHost);
+    auto* host_cursor                = static_cast<std::uint8_t*>(host);
+    const auto* device_cursor        = static_cast<const std::uint8_t*>(device);
+    const std::size_t rows_per_chunk = buffer_bytes_ / row_bytes;
+    while (rows != 0) {
+        const std::size_t chunk_rows = std::min(rows, rows_per_chunk);
+        Slot& slot                   = acquire_slot();
+        const std::size_t bytes      = chunk_rows * row_bytes;
+        CUDA_CHECK(cudaMemcpyAsync(slot.buffer.data(), device_cursor, bytes,
+                                   cudaMemcpyDeviceToHost, stream_));
+        CUDA_CHECK(cudaEventRecord(slot.ready, stream_));
+        slot.pageable_target = host_cursor;
+        slot.copied_bytes    = bytes;
+        slot.target_pitch    = host_pitch;
+        slot.row_bytes       = row_bytes;
+        slot.rows            = chunk_rows;
+        slot.pending         = true;
+        host_cursor += chunk_rows * host_pitch;
+        device_cursor += bytes;
+        rows -= chunk_rows;
+    }
+}
+
+void HostTransferStager::host_fragments_to_device(
+    void* device, std::span<const std::span<const std::uint8_t>> fragments,
+    std::size_t fragment_offset, std::size_t fragment_bytes) {
+    if (fragments.empty() || fragment_bytes == 0) { return; }
+    if (device == nullptr || fragment_bytes > buffer_bytes_) {
+        throw std::invalid_argument("HostTransferStager fragmented source is invalid");
+    }
+    for (const auto fragment : fragments) {
+        if (fragment_offset > fragment.size() ||
+            fragment_bytes > fragment.size() - fragment_offset) {
+            throw std::invalid_argument("HostTransferStager fragment is truncated");
+        }
+    }
+    set_direction(Direction::HostToDevice);
+    auto* device_cursor              = static_cast<std::uint8_t*>(device);
+    const std::size_t rows_per_chunk = buffer_bytes_ / fragment_bytes;
+    std::size_t begin                = 0;
+    while (begin < fragments.size()) {
+        const std::size_t rows = std::min(rows_per_chunk, fragments.size() - begin);
+        Slot& slot             = acquire_slot();
+        auto* target           = static_cast<std::uint8_t*>(slot.buffer.data());
+        for (std::size_t row = 0; row < rows; ++row) {
+            const auto fragment = fragments[begin + row];
+            std::memcpy(target + row * fragment_bytes, fragment.data() + fragment_offset,
+                        fragment_bytes);
+        }
+        const std::size_t bytes = rows * fragment_bytes;
+        CUDA_CHECK(cudaMemcpyAsync(device_cursor, slot.buffer.data(), bytes,
+                                   cudaMemcpyHostToDevice, stream_));
+        CUDA_CHECK(cudaEventRecord(slot.ready, stream_));
+        slot.pending = true;
+        device_cursor += bytes;
+        begin += rows;
     }
 }
 

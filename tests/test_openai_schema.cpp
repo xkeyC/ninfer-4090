@@ -555,6 +555,9 @@ int test_response_serialization() {
     int failures = 0;
     CompletionUsage usage{10, 3};
     usage.cache_hit_tokens = 7;
+    usage.has_timings = true;
+    usage.queue_seconds = 0.125;
+    usage.host_restore_seconds = 0.375;
     const Json j = Json::parse(
         make_chat_completion_response("id-1", "m", 111, "hello world", "", "stop", usage));
     failures += check(j.at("object") == "chat.completion", "response object");
@@ -573,6 +576,10 @@ int test_response_serialization() {
     failures += check(j.at("usage").at("total_tokens") == 13, "usage total_tokens");
     failures += check(j.at("usage").at("prompt_tokens_details").at("cached_tokens") == 7,
                       "usage cached prompt tokens");
+    failures += check(j.at("timings").at("queue_ms") == 125.0,
+                      "per-request queue time missing");
+    failures += check(j.at("timings").at("cache_restore_ms") == 375.0,
+                      "per-request host restore time missing");
 
     // Non-empty reasoning is attached as message.reasoning_content, content stays answer-only.
     const Json jr = Json::parse(make_chat_completion_response("id-2", "m", 111, "the answer",

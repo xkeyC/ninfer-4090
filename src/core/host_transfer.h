@@ -7,6 +7,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 namespace ninfer {
 
@@ -37,6 +38,16 @@ public:
     void host_to_device_2d(void* device, std::size_t device_pitch, const void* host,
                            std::size_t width, std::size_t height);
 
+    // Streams a contiguous device region to/from page-group-major pageable storage. The
+    // device rows are contiguous; host rows either have a fixed pitch or live in independent
+    // immutable fragments. This keeps block-cache restore incremental without materializing a
+    // second contiguous snapshot.
+    void device_to_host_strided(void* host, std::size_t host_pitch, const void* device,
+                                std::size_t row_bytes, std::size_t rows);
+    void host_fragments_to_device(
+        void* device, std::span<const std::span<const std::uint8_t>> fragments,
+        std::size_t fragment_offset, std::size_t fragment_bytes);
+
     void finish();
 
 private:
@@ -49,6 +60,9 @@ private:
         cudaEvent_t ready        = nullptr;
         void* pageable_target    = nullptr;
         std::size_t copied_bytes = 0;
+        std::size_t target_pitch = 0;
+        std::size_t row_bytes    = 0;
+        std::size_t rows         = 0;
         bool pending             = false;
     };
 

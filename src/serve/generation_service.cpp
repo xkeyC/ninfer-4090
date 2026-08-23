@@ -460,6 +460,8 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     outcome.session_digest    = std::move(result.session_digest);
 
     outcome.metrics.prepare_seconds = prepared.prepare_seconds;
+    outcome.metrics.queue_seconds   = result.timings.queue_seconds;
+    outcome.metrics.host_restore_seconds = result.timings.host_restore_seconds;
     outcome.metrics.ttft_seconds =
         prepared.prepare_seconds +
         std::max(0.0, result.timings.first_token_seconds - result.timings.prepare_seconds);

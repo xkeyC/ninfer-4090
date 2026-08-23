@@ -235,9 +235,16 @@ std::vector<SlotCheckpoint> Program<Variant>::retained_lane_checkpoints(std::uin
 
 template <>
 RetainedSessionSnapshot Program<Variant>::save_retained_lane(std::uint32_t lane,
-                                                             std::string_view model_binding,
-                                                             std::span<const std::uint8_t> base_snapshot) {
-    return impl_->save_retained_lane(lane, model_binding, base_snapshot);
+                                                             std::string_view model_binding) {
+    return impl_->save_retained_lane(lane, model_binding);
+}
+
+template <>
+RetainedSessionSnapshot
+Program<Variant>::capture_retained_lane_cache(std::uint32_t lane,
+                                              std::string_view model_binding,
+                                              RetainedSessionCacheView base) {
+    return impl_->capture_retained_lane_cache(lane, model_binding, base);
 }
 
 template <>
@@ -253,6 +260,14 @@ std::uint32_t Program<Variant>::restore_retained_lane(std::uint32_t lane,
                                                       std::span<const std::uint8_t> snapshot,
                                                       std::string_view model_binding) {
     return impl_->restore_retained_lane(lane, snapshot, model_binding);
+}
+
+template <>
+std::uint32_t
+Program<Variant>::restore_retained_lane_cache(std::uint32_t lane,
+                                              RetainedSessionCacheView snapshot,
+                                              std::string_view model_binding) {
+    return impl_->restore_retained_lane_cache(lane, snapshot, model_binding);
 }
 
 template <>

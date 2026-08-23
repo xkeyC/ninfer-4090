@@ -67,17 +67,47 @@ int main() {
     failures += check(deepest && deepest->reused_tokens == 80,
                       "cache did not select the deepest reusable prefix");
     if (deepest) {
-        auto restored = shared.materialize(deepest->id);
-        failures += check(restored && restored->bytes == std::vector<std::uint8_t>({1, 2, 5, 6}),
-                          "manifest materialization did not rebuild the durable image");
+        const auto restored = shared.view(deepest->id);
+        failures += check(restored && restored->blocks.size() == 2 &&
+                              restored->blocks[0][0] == 1 && restored->blocks[1][1] == 6,
+                          "manifest view did not preserve immutable block order");
         failures += check(shared.pin(deepest->id) && shared.unpin(deepest->id),
                           "manifest pin lifecycle failed");
     }
 
+    Cache delta_cache(4096, FakeClock::duration(10));
+    const auto delta_base = delta_cache.insert(image({10, 11, 20, 21}, 40, "delta-base", {2, 2}));
+    Image delta_image;
+    delta_image.tokens = 80;
+    delta_image.session_digest = "delta-child";
+    const std::vector<Cache::BlockSource> delta_sources{
+        {.base_block_index = 0, .bytes = 2},
+        {.delta_offset = 0, .bytes = 2},
+    };
+    const auto delta_child = delta_cache.insert_delta(
+        std::move(delta_image), delta_base.id, std::vector<std::uint8_t>{30, 31}, delta_sources);
+    failures += check(delta_base.inserted && delta_child.inserted &&
+                          delta_cache.block_count() == 3,
+                      "delta insertion did not reuse the immutable base block");
+    if (delta_child.inserted) {
+        const auto view = delta_cache.view(delta_child.id, false);
+        failures += check(view && view->blocks.size() == 2 && view->blocks[0][0] == 10 &&
+                              view->blocks[1][1] == 31,
+                          "block view did not expose the delta manifest without materialization");
+    }
+
     Cache probe(4096, FakeClock::duration(10));
     (void)probe.insert(filled(100, 1, 10, "probe-a"));
+    const std::size_t one_entry_capacity = probe.used_bytes();
     (void)probe.insert(filled(100, 2, 20, "probe-b"));
     const std::size_t two_entry_capacity = probe.used_bytes();
+
+    Cache replacement(one_entry_capacity, FakeClock::duration(10));
+    const auto replace_old = replacement.insert(filled(100, 7, 10, "replace-old"));
+    const auto replace_new = replacement.insert(filled(100, 7, 20, "replace-new"));
+    failures += check(replace_old.inserted && replace_new.inserted && replace_new.evicted == 1 &&
+                          replacement.size() == 1,
+                      "shared protected blocks prevented manifest replacement");
 
     FakeClock::current = FakeClock::time_point{};
     Cache ranked(two_entry_capacity, FakeClock::duration(10));

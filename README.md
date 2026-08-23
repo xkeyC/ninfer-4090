@@ -17,7 +17,8 @@ This fork adds a process-local host block cache for long agent conversations tha
 residency. `--host-prefix-cache-mib N` partitions a retained snapshot into metadata, cumulative GDN
 state/checkpoints, and 64-token KV page groups. Byte-identical immutable blocks are stored once
 across conversation branches, while logical manifests remain available even when one copy is
-restored into a GPU lane. A later spill transfers only new or changed device blocks.
+restored into a GPU lane. Restore streams block spans directly to pinned staging instead of first
+copying the full snapshot; a later spill transfers and hashes only new or changed device blocks.
 
 Each block records its recall count and last-recall time. When the byte budget is full, eviction
 chooses the coldest unpinned block using recency plus a logarithmic frequency bonus and removes all
@@ -299,9 +300,9 @@ GCC 13, and CMake 3.28 or newer; the Docker image builds with CUDA 13.1.
 - **`/v1/models` reports `context_window`.** Clients without access to a llama.cpp `/props` or a
   vLLM `max_model_len` can size prompts from the models payload.
 - **llama.cpp-compatible `timings` on chat completions.** Responses and final stream chunks carry
-  a top-level `timings` block (`prompt_n`/`predicted_n`, per-second rates, `ttft_ms`, `cache_n`,
-  `draft_n`/`draft_n_accepted`), so proxies such as llama-swap show per-request prefill and decode
-  rates, MTP draft acceptance, and prefix-cache hits. Contributed by the
+  a top-level `timings` block (`prompt_n`/`predicted_n`, per-second rates, `ttft_ms`, `queue_ms`,
+  `cache_restore_ms`, `cache_n`, `draft_n`/`draft_n_accepted`), so proxies such as llama-swap show
+  per-request prefill and decode rates, MTP draft acceptance, and prefix-cache hits. Contributed by the
   [shantanusingh16 fork](https://github.com/shantanusingh16/ninfer-4090) of this repository.
 - **`GET /metrics`.** Prometheus counters under llama.cpp-compatible names
   (`llamacpp:prompt_tokens_total`, `llamacpp:prompt_seconds_total`,

@@ -66,9 +66,11 @@ CompletionUsage usage_with_timings(const GenerationOutcome& outcome) {
     usage.prompt_tokens     = outcome.prompt_tokens;
     usage.completion_tokens = outcome.completion_tokens;
     usage.has_timings       = true;
-    usage.prefill_seconds   = outcome.metrics.prefill_seconds;
-    usage.decode_seconds    = outcome.metrics.decode_seconds;
-    usage.ttft_seconds      = outcome.metrics.ttft_seconds;
+    usage.prefill_seconds        = outcome.metrics.prefill_seconds;
+    usage.decode_seconds         = outcome.metrics.decode_seconds;
+    usage.ttft_seconds           = outcome.metrics.ttft_seconds;
+    usage.queue_seconds          = outcome.metrics.queue_seconds;
+    usage.host_restore_seconds = outcome.metrics.host_restore_seconds;
     usage.cache_hit_tokens  = outcome.metrics.prefix_cache_hit_tokens;
     usage.draft_tokens      = outcome.metrics.speculative_draft_tokens;
     usage.accepted_tokens   = outcome.metrics.speculative_accepted_tokens;

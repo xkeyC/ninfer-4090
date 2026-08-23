@@ -324,6 +324,8 @@ std::string format_request_done(const RequestLogContext& context,
         << " cache=" << metrics.prefix_cache_hit_tokens
         << " reuse=" << prefix_reuse_path_name(metrics.prefix_reuse_path) << " ttft=" << std::fixed
         << std::setprecision(0) << ttft_ms << "ms"
+        << " queue=" << (metrics.queue_seconds * 1000.0) << "ms"
+        << " restore=" << (metrics.host_restore_seconds * 1000.0) << "ms"
         << " prefill=" << rate(computed_prefill_tokens, metrics.prefill_seconds)
         << " decode=" << rate(decode_tokens, metrics.decode_seconds)
         << " wall=" << seconds_str(metrics.total_seconds)
@@ -471,10 +473,14 @@ std::string format_request_done_json(const std::string& server_instance_id, std:
              {"prefix_cache_hit_tokens", outcome.metrics.prefix_cache_hit_tokens},
              {"prefix_reuse_path", prefix_reuse_path_name(outcome.metrics.prefix_reuse_path)},
              {"tool_call_count", outcome.tool_calls.size()}};
-    record["timings_seconds"] = Json{
-        {"prepare", outcome.metrics.prepare_seconds}, {"ttft", outcome.metrics.ttft_seconds},
-        {"vision", outcome.metrics.vision_seconds},   {"prefill", outcome.metrics.prefill_seconds},
-        {"decode", outcome.metrics.decode_seconds},   {"total", outcome.metrics.total_seconds}};
+    record["timings_seconds"] = Json{{"prepare", outcome.metrics.prepare_seconds},
+                                      {"queue", outcome.metrics.queue_seconds},
+                                      {"host_restore", outcome.metrics.host_restore_seconds},
+                                      {"ttft", outcome.metrics.ttft_seconds},
+                                      {"vision", outcome.metrics.vision_seconds},
+                                      {"prefill", outcome.metrics.prefill_seconds},
+                                      {"decode", outcome.metrics.decode_seconds},
+                                      {"total", outcome.metrics.total_seconds}};
     record["speculative"] = speculative_json(outcome.metrics);
     return record.dump();
 }

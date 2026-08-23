@@ -322,6 +322,98 @@ void PagedKVPool::copy_pages_from_host(std::span<const std::int32_t> page_ids, c
                                    &transfer);
 }
 
+void PagedKVPool::copy_page_blocks_to_host(std::span<const std::int32_t> page_ids, void* host,
+                                           HostTransferStager& transfer) const {
+    if (page_ids.empty()) { return; }
+    if (host == nullptr) {
+        throw std::invalid_argument("Paged KV page-block destination is null");
+    }
+    for (const std::int32_t page : page_ids) {
+        if (page < 0 || page >= static_cast<std::int32_t>(spec_.page_group_count)) {
+            throw std::out_of_range("Paged KV physical page is out of range");
+        }
+    }
+
+    auto* host_base                 = static_cast<std::uint8_t*>(host);
+    const std::size_t block_bytes   = page_payload_bytes();
+    std::size_t plane_block_offset  = 0;
+    for (const Tensor& plane : planes_) {
+        const std::size_t page_bytes = plane_page_bytes(spec_, plane);
+        auto* device_base            = static_cast<std::uint8_t*>(plane.data);
+        if (spec_.plane_order == PagedKVPlaneOrder::PageMajor) {
+            std::size_t begin = 0;
+            while (begin < page_ids.size()) {
+                std::size_t end = begin + 1;
+                while (end < page_ids.size() && page_ids[end] == page_ids[end - 1] + 1) { ++end; }
+                const std::size_t rows = end - begin;
+                const auto* device = device_base + static_cast<std::size_t>(page_ids[begin]) *
+                                                       page_bytes;
+                transfer.device_to_host_strided(host_base + begin * block_bytes +
+                                                    plane_block_offset,
+                                                block_bytes, device, page_bytes, rows);
+                begin = end;
+            }
+        } else {
+            for (std::size_t index = 0; index < page_ids.size(); ++index) {
+                const auto* device = device_base + static_cast<std::size_t>(page_ids[index]) *
+                                                       static_cast<std::size_t>(plane.nb[2]);
+                transfer.device_to_host_2d(host_base + index * block_bytes + plane_block_offset,
+                                           device, static_cast<std::size_t>(plane.nb[3]),
+                                           static_cast<std::size_t>(plane.nb[2]),
+                                           static_cast<std::size_t>(plane.ne[3]));
+            }
+        }
+        plane_block_offset += page_bytes;
+    }
+}
+
+void PagedKVPool::copy_page_blocks_from_host(
+    std::span<const std::int32_t> page_ids,
+    std::span<const std::span<const std::uint8_t>> page_blocks,
+    HostTransferStager& transfer) {
+    if (page_ids.size() != page_blocks.size()) {
+        throw std::invalid_argument("Paged KV page-block count is inconsistent");
+    }
+    const std::size_t block_bytes = page_payload_bytes();
+    for (std::size_t index = 0; index < page_ids.size(); ++index) {
+        if (page_ids[index] < 0 ||
+            page_ids[index] >= static_cast<std::int32_t>(spec_.page_group_count)) {
+            throw std::out_of_range("Paged KV physical page is out of range");
+        }
+        if (page_blocks[index].size() != block_bytes) {
+            throw std::invalid_argument("Paged KV page block has the wrong size");
+        }
+    }
+
+    std::size_t plane_block_offset = 0;
+    for (const Tensor& plane : planes_) {
+        const std::size_t page_bytes = plane_page_bytes(spec_, plane);
+        auto* device_base            = static_cast<std::uint8_t*>(plane.data);
+        if (spec_.plane_order == PagedKVPlaneOrder::PageMajor) {
+            std::size_t begin = 0;
+            while (begin < page_ids.size()) {
+                std::size_t end = begin + 1;
+                while (end < page_ids.size() && page_ids[end] == page_ids[end - 1] + 1) { ++end; }
+                auto* device = device_base + static_cast<std::size_t>(page_ids[begin]) * page_bytes;
+                transfer.host_fragments_to_device(device, page_blocks.subspan(begin, end - begin),
+                                                  plane_block_offset, page_bytes);
+                begin = end;
+            }
+        } else {
+            for (std::size_t index = 0; index < page_ids.size(); ++index) {
+                auto* device = device_base + static_cast<std::size_t>(page_ids[index]) *
+                                                 static_cast<std::size_t>(plane.nb[2]);
+                transfer.host_to_device_2d(
+                    device, static_cast<std::size_t>(plane.nb[3]),
+                    page_blocks[index].data() + plane_block_offset,
+                    static_cast<std::size_t>(plane.nb[2]),
+                    static_cast<std::size_t>(plane.ne[3]));
+            }
+        }
+        plane_block_offset += page_bytes;
+    }
+}
+
 std::vector<std::int32_t> PagedKVPool::take_pages(std::uint32_t count,
                                                   std::int32_t preferred_first) {
     if (count == 0) { return {}; }

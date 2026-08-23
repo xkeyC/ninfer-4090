@@ -334,16 +334,20 @@ private:
             const std::string_view binding =
                 save_host ? std::string_view(host_prefix_cache_model_binding_)
                           : std::string_view(eviction_model_binding_);
-            std::optional<targets::qwen3_6::RetainedSessionSnapshot> base_snapshot;
-            if (save_host && lane_host_cache_entry_[lane]) {
-                base_snapshot =
-                    host_prefix_cache_.materialize(*lane_host_cache_entry_[lane], false);
+            const std::optional<HostEntryId> base_entry_id = lane_host_cache_entry_[lane];
+            std::optional<typename HostCache::View> base_view;
+            if (save_host && base_entry_id) {
+                base_view = host_prefix_cache_.view(*base_entry_id, false);
             }
-            const std::span<const std::uint8_t> base_bytes =
-                base_snapshot ? std::span<const std::uint8_t>(base_snapshot->bytes.data(),
-                                                              base_snapshot->bytes.size())
-                              : std::span<const std::uint8_t>{};
-            auto snapshot = instance_.program->save_retained_lane(lane, binding, base_bytes);
+            targets::qwen3_6::RetainedSessionCacheView target_base;
+            if (base_view) {
+                target_base.manifest = base_view->image;
+                target_base.blocks   = base_view->blocks;
+            }
+            auto snapshot = save_host
+                                ? instance_.program->capture_retained_lane_cache(lane, binding,
+                                                                                 target_base)
+                                : instance_.program->save_retained_lane(lane, binding);
             release_lane_host_entry(lane);
             if (save_host) {
                 cumulative_stats_.host_prefix_cache_capture_bytes +=
@@ -358,13 +362,52 @@ private:
                 auto disk_snapshot =
                     save_host ? snapshot : targets::qwen3_6::RetainedSessionSnapshot{};
                 if (save_host) {
+                    std::size_t total = 0;
+                    for (const auto& block : disk_snapshot.cache_blocks) {
+                        total += block.bytes;
+                    }
+                    disk_snapshot.bytes.reserve(total);
+                    disk_snapshot.cache_block_sizes.reserve(disk_snapshot.cache_blocks.size());
+                    for (const auto& block : disk_snapshot.cache_blocks) {
+                        if (block.base_block_index !=
+                            targets::qwen3_6::RetainedSessionSnapshot::CacheBlock::kNew) {
+                            if (!base_view || block.base_block_index >= base_view->blocks.size()) {
+                                throw std::logic_error("cache delta references an invalid base block");
+                            }
+                            const auto bytes = base_view->blocks[block.base_block_index];
+                            disk_snapshot.bytes.insert(disk_snapshot.bytes.end(), bytes.begin(),
+                                                       bytes.end());
+                        } else {
+                            const auto begin = disk_snapshot.cache_delta_bytes.begin() +
+                                               static_cast<std::ptrdiff_t>(block.delta_offset);
+                            disk_snapshot.bytes.insert(
+                                disk_snapshot.bytes.end(), begin,
+                                begin + static_cast<std::ptrdiff_t>(block.bytes));
+                        }
+                        disk_snapshot.cache_block_sizes.push_back(block.bytes);
+                    }
+                    disk_snapshot.cache_delta_bytes.clear();
+                    disk_snapshot.cache_blocks.clear();
                     eviction_sink_(lane_session_path_[lane], std::move(disk_snapshot));
                 } else {
                     eviction_sink_(lane_session_path_[lane], std::move(snapshot));
                 }
             }
             if (save_host) {
-                const auto inserted = host_prefix_cache_.insert(std::move(snapshot));
+                std::vector<typename HostCache::BlockSource> blocks;
+                blocks.reserve(snapshot.cache_blocks.size());
+                for (const auto& block : snapshot.cache_blocks) {
+                    blocks.push_back(typename HostCache::BlockSource{
+                        .base_block_index = block.base_block_index,
+                        .delta_offset     = block.delta_offset,
+                        .bytes            = block.bytes,
+                    });
+                }
+                auto delta = std::move(snapshot.cache_delta_bytes);
+                snapshot.cache_blocks.clear();
+                snapshot.cache_blocks.shrink_to_fit();
+                const auto inserted = host_prefix_cache_.insert_delta(
+                    std::move(snapshot), base_entry_id, std::move(delta), blocks);
                 cumulative_stats_.host_prefix_cache_evictions += inserted.evicted;
                 if (inserted.inserted) {
                     ++cumulative_stats_.host_prefix_cache_captures;
@@ -501,6 +544,9 @@ private:
         ResolvedRequestOptions options;
         Clock::time_point deadline;
         Clock::time_point submitted;
+        std::optional<Clock::time_point> admission_started;
+        double queue_seconds        = 0.0;
+        double host_restore_seconds = 0.0;
         std::optional<Clock::time_point> first_token;
         std::optional<GenerationBudget> budget;
         std::optional<BeginSummary> begin;
@@ -676,6 +722,8 @@ private:
                 affinity_grace_deadline_ = Clock::now() + kv_affinity_grace_;
             }
         }
+        result.timings.queue_seconds        = request->queue_seconds;
+        result.timings.host_restore_seconds = request->host_restore_seconds;
         if (request->first_token) {
             result.timings.first_token_seconds =
                 request->prepare_seconds +
@@ -1108,19 +1156,26 @@ private:
             return AdmissionProgress::ControlProgress;
         }
 
+        if (!request->admission_started) {
+            request->admission_started = Clock::now();
+            request->queue_seconds =
+                std::chrono::duration<double>(*request->admission_started - request->submitted)
+                    .count();
+        }
+
         const std::uint32_t lane = choice.lane;
         if (!request->lane_plans[lane]) {
             throw std::logic_error("selected admission lane has no request plan");
         }
-        // Pin and materialize a host candidate before preserving other victims. The immutable
-        // manifest remains in the cache so branches share its blocks and a later incremental
-        // capture can reuse every unchanged full page.
-        std::optional<targets::qwen3_6::RetainedSessionSnapshot> host_snapshot;
+        // Pin the immutable block view before preserving other victims. Restore consumes the
+        // spans directly; the manifest stays matchable and a later capture reuses unchanged
+        // full pages without assembling or re-hashing a contiguous snapshot.
+        std::optional<typename HostCache::View> host_snapshot;
         if (choice.host_cache_entry) {
             if (!host_prefix_cache_.pin(*choice.host_cache_entry)) {
                 throw std::logic_error("selected host prefix cache entry disappeared");
             }
-            host_snapshot = host_prefix_cache_.materialize(*choice.host_cache_entry);
+            host_snapshot = host_prefix_cache_.view(*choice.host_cache_entry);
             if (!host_snapshot) {
                 (void)host_prefix_cache_.unpin(*choice.host_cache_entry);
                 throw std::logic_error("selected host prefix cache entry disappeared");
@@ -1152,13 +1207,16 @@ private:
                 instance_.program->evict_retained_lane(lane);
                 invalidate_lane_plans(lane);
             }
-            const std::size_t restore_bytes = host_snapshot->bytes.size();
+            std::size_t restore_bytes = 0;
+            for (const auto block : host_snapshot->blocks) { restore_bytes += block.size(); }
             const auto restore_started      = Clock::now();
             try {
-                (void)instance_.program->restore_retained_lane(
+                (void)instance_.program->restore_retained_lane_cache(
                     lane,
-                    std::span<const std::uint8_t>(host_snapshot->bytes.data(),
-                                                  host_snapshot->bytes.size()),
+                    targets::qwen3_6::RetainedSessionCacheView{
+                        .manifest = host_snapshot->image,
+                        .blocks   = host_snapshot->blocks,
+                    },
                     host_prefix_cache_model_binding_);
                 invalidate_lane_plans(lane);
                 request->lane_plans[lane].reset();
@@ -1171,8 +1229,10 @@ private:
                 ++cumulative_stats_.host_prefix_cache_hits;
                 lane_host_cache_entry_[lane] = *choice.host_cache_entry;
                 cumulative_stats_.host_prefix_cache_restore_bytes += restore_bytes;
-                cumulative_stats_.host_prefix_cache_restore_seconds +=
+                const double restore_seconds =
                     std::chrono::duration<double>(Clock::now() - restore_started).count();
+                request->host_restore_seconds += restore_seconds;
+                cumulative_stats_.host_prefix_cache_restore_seconds += restore_seconds;
             } catch (...) {
                 ++cumulative_stats_.host_prefix_cache_restore_failures;
                 cumulative_stats_.host_prefix_cache_restore_seconds +=

@@ -362,12 +362,14 @@ private:
 };
 
 struct GenerationTimings {
-    double prepare_seconds     = 0.0;
-    double first_token_seconds = 0.0;
-    double vision_seconds      = 0.0;
-    double prefill_seconds     = 0.0;
-    double decode_seconds      = 0.0;
-    double total_seconds       = 0.0;
+    double prepare_seconds      = 0.0;
+    double queue_seconds        = 0.0;
+    double host_restore_seconds = 0.0;
+    double first_token_seconds  = 0.0;
+    double vision_seconds       = 0.0;
+    double prefill_seconds      = 0.0;
+    double decode_seconds       = 0.0;
+    double total_seconds        = 0.0;
 };
 
 struct SpeculativeStats {

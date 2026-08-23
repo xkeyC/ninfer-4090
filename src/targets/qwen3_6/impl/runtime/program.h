@@ -256,14 +256,22 @@ public:
     [[nodiscard]] std::string retained_lane_digest(std::uint32_t lane) const;
     [[nodiscard]] std::vector<SlotCheckpoint> retained_lane_checkpoints(std::uint32_t lane) const;
     [[nodiscard]] qwen3_6::RetainedSessionSnapshot
-    save_retained_lane(std::uint32_t lane, std::string_view model_binding,
-                       std::span<const std::uint8_t> base_snapshot = {});
+    save_retained_lane(std::uint32_t lane, std::string_view model_binding);
+    [[nodiscard]] qwen3_6::RetainedSessionSnapshot
+    capture_retained_lane_cache(std::uint32_t lane, std::string_view model_binding,
+                                qwen3_6::RetainedSessionCacheView base = {});
     [[nodiscard]] std::uint32_t
     reusable_snapshot_prefix(const qwen3_6::RetainedSessionSnapshot& snapshot,
                              const PreparedPromptData& prompt, bool allow_prefix_reuse) const;
     [[nodiscard]] std::uint32_t restore_retained_lane(std::uint32_t lane,
                                                       std::span<const std::uint8_t> snapshot,
                                                       std::string_view model_binding);
+    [[nodiscard]] std::uint32_t
+    restore_retained_lane_cache(std::uint32_t lane, qwen3_6::RetainedSessionCacheView snapshot,
+                                std::string_view model_binding);
+    template <class Reader>
+    [[nodiscard]] std::uint32_t restore_retained_lane_reader(std::uint32_t lane, Reader reader,
+                                                             std::string_view model_binding);
     [[nodiscard]] GenerationTimings generation_timings_lane(std::uint32_t lane) const noexcept;
     [[nodiscard]] SpeculativeStats speculative_stats_lane(std::uint32_t lane) const noexcept;
 

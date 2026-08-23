@@ -8,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <span>
 #include <string>
@@ -35,6 +36,16 @@ struct GraphExecutionProfile {
 // byte layout is a target-private format; callers treat it as opaque and durable only across
 // processes serving the identical model and KV configuration.
 struct RetainedSessionSnapshot {
+    struct CacheBlock {
+        static constexpr std::size_t kNew = std::numeric_limits<std::size_t>::max();
+
+        // kNew means [delta_offset, delta_offset + bytes) is a newly captured block.
+        // Otherwise the block is an immutable reference to that index in the supplied base view.
+        std::size_t base_block_index = kNew;
+        std::size_t delta_offset     = 0;
+        std::size_t bytes            = 0;
+    };
+
     std::vector<std::uint8_t> bytes;
     std::uint32_t tokens = 0;
     std::string session_digest;
@@ -44,6 +55,11 @@ struct RetainedSessionSnapshot {
     // `device_transfer_bytes` is the actual D2H payload for this capture, which can be smaller
     // than the durable image when unchanged full KV pages came from a previous manifest.
     std::vector<std::size_t> cache_block_sizes;
+    // Host-cache capture form. `cache_blocks` describes the complete logical image while
+    // `cache_delta_bytes` owns only blocks that changed since the base manifest. Durable slot
+    // serialization continues to use `bytes`; the online cache never materializes it.
+    std::vector<std::uint8_t> cache_delta_bytes;
+    std::vector<CacheBlock> cache_blocks;
     std::size_t cache_metadata_bytes = 0;
     std::size_t device_transfer_bytes = 0;
 
@@ -59,6 +75,11 @@ struct RetainedSessionSnapshot {
     std::vector<std::uint8_t> token_types;
     std::array<std::vector<std::int32_t>, 3> positions;
     std::vector<VisionItem> vision_items;
+};
+
+struct RetainedSessionCacheView {
+    const RetainedSessionSnapshot* manifest = nullptr;
+    std::span<const std::span<const std::uint8_t>> blocks;
 };
 
 namespace detail {
@@ -216,14 +237,19 @@ public:
     // serving weights identity; restore rejects a mismatched binding or configuration. Both
     // synchronize the device before returning and require the lane to hold no active request.
     [[nodiscard]] RetainedSessionSnapshot
-    save_retained_lane(std::uint32_t lane, std::string_view model_binding,
-                       std::span<const std::uint8_t> base_snapshot = {});
+    save_retained_lane(std::uint32_t lane, std::string_view model_binding);
+    [[nodiscard]] RetainedSessionSnapshot
+    capture_retained_lane_cache(std::uint32_t lane, std::string_view model_binding,
+                                RetainedSessionCacheView base = {});
     [[nodiscard]] std::uint32_t reusable_snapshot_prefix(const RetainedSessionSnapshot& snapshot,
                                                          const PreparedPrompt& prompt,
                                                          bool allow_prefix_reuse) const;
     [[nodiscard]] std::uint32_t restore_retained_lane(std::uint32_t lane,
                                                       std::span<const std::uint8_t> snapshot,
                                                       std::string_view model_binding);
+    [[nodiscard]] std::uint32_t restore_retained_lane_cache(std::uint32_t lane,
+                                                            RetainedSessionCacheView snapshot,
+                                                            std::string_view model_binding);
     [[nodiscard]] GenerationTimings generation_timings_lane(std::uint32_t lane) const noexcept;
     [[nodiscard]] SpeculativeStats speculative_stats_lane(std::uint32_t lane) const noexcept;
 

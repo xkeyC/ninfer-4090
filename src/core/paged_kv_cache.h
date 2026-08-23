@@ -148,6 +148,16 @@ public:
     void copy_pages_from_host(std::span<const std::int32_t> page_ids, const void* host,
                               HostTransferStager& transfer);
 
+    // Block-cache layout: one independently addressable block per physical page group, with
+    // that page's plane payloads concatenated in plane order. Unlike the durable plane-major
+    // transfer above, extending a prefix never changes the bytes of an existing page block.
+    void copy_page_blocks_to_host(std::span<const std::int32_t> page_ids, void* host,
+                                  HostTransferStager& transfer) const;
+    void copy_page_blocks_from_host(
+        std::span<const std::int32_t> page_ids,
+        std::span<const std::span<const std::uint8_t>> page_blocks,
+        HostTransferStager& transfer);
+
 private:
     friend class PagedKVAllocation;
     friend void resize_paged_kv_bundle(std::span<const PagedKVResize> changes);

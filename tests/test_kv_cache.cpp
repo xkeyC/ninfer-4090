@@ -232,6 +232,44 @@ int test_host_page_copies(ninfer::DeviceContext& ctx, ninfer::PagedKVPlaneOrder 
             }
         }
     }
+    if (staged) {
+        for (std::size_t plane_index = 0; plane_index < dest.plane_count(); ++plane_index) {
+            const ninfer::Tensor& plane = dest.plane(plane_index);
+            if (cudaMemset(plane.data, 0xEE, plane.bytes()) != cudaSuccess) { return ++failures; }
+        }
+        ninfer::HostTransferStager transfer(ctx.stream, 32 << 10);
+        std::vector<unsigned char> page_image(4 * source.page_payload_bytes());
+        source.copy_page_blocks_to_host(source_pages, page_image.data(), transfer);
+        transfer.finish();
+
+        // Restore from genuinely discontiguous immutable blocks; this is the HostPrefixCache
+        // path and catches plane-major/page-major framing mistakes as a behavioral round trip.
+        std::vector<std::vector<unsigned char>> owned_blocks(4);
+        std::vector<std::span<const std::uint8_t>> block_views;
+        block_views.reserve(owned_blocks.size());
+        for (std::size_t page = 0; page < owned_blocks.size(); ++page) {
+            const auto begin = page_image.begin() + static_cast<std::ptrdiff_t>(
+                                                     page * source.page_payload_bytes());
+            owned_blocks[page].assign(
+                begin, begin + static_cast<std::ptrdiff_t>(source.page_payload_bytes()));
+            block_views.emplace_back(owned_blocks[page]);
+        }
+        dest.copy_page_blocks_from_host(dest_pages, block_views, transfer);
+        transfer.finish();
+        for (std::size_t position = 0; position < 4; ++position) {
+            for (std::size_t plane_index = 0; plane_index < source.plane_count(); ++plane_index) {
+                const auto from =
+                    read_page_from_plane(source.plane(plane_index), order, source_pages[position]);
+                const auto to =
+                    read_page_from_plane(dest.plane(plane_index), order, dest_pages[position]);
+                if (from.empty() || from != to) {
+                    ++failures;
+                    std::cerr << label << " block payload diverged at position " << position
+                              << " plane " << plane_index << '\n';
+                }
+            }
+        }
+    }
     return failures;
 }
 
