@@ -81,13 +81,15 @@ std::string usage_text(const char* argv0) {
            " <model.ninfer> (--prompt <text>|--messages <messages.json>)\n"
            "[--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
            "[--device N]\n"
-           "[--kv-dtype bf16|int8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8] [--spec mtp|dflash --draft-tokens N]\n"
+           "[--kv-dtype bf16|int8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8] [--spec mtp|dflash --draft-tokens "
+           "N]\n"
            "       [--lm-head-draft]\n"
            "       [--temperature F] [--top-p F] [--top-k N] [--min-p F]\n"
            "       [--presence-penalty F] [--frequency-penalty F] [--seed N] [--greedy]\n"
            "       [--stop-token-id N]... [--stop <text>]... [--reasoning-stop <text>]...\n"
            "       [--raw-output] [--print-token-ids] [--no-thinking]\n"
-           "       [--reasoning-effort low|medium|xhigh] [--vision] [--vision-max-tokens N]\n"
+           "       [--reasoning-effort low|medium|xhigh] [--vision] [--vision-max-tokens N] "
+           "[--vision-max-attention-pairs N] [--vision-max-media-items N]\n"
            "       [--no-cuda-graph]\n"
            "\n"
            "Streams answer content to stdout and reasoning plus diagnostics to stderr.\n"
@@ -152,6 +154,13 @@ Options parse_options(int argc, char** argv) {
             options.reasoning_effort = parse_reasoning_effort(value(arg));
         } else if (arg == "--vision") {
             options.enable_vision = true;
+        } else if (arg == "--vision-max-attention-pairs") {
+            options.vision_max_attention_pairs = parse_u64(value(arg), arg);
+            if (options.vision_max_attention_pairs == 0) {
+                throw std::invalid_argument("--vision-max-attention-pairs must be positive");
+            }
+        } else if (arg == "--vision-max-media-items") {
+            options.vision_max_media_items = parse_u32(value(arg), arg);
         } else if (arg == "--vision-max-tokens" || arg == "--vision-limit") {
             options.vision_max_tokens = parse_u32(value(arg), "vision-max-tokens", false);
             options.enable_vision     = true;

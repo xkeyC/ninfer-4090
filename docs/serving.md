@@ -684,3 +684,9 @@ decoding.
 
 Prompt-token usage includes chat-template and expanded media tokens. Generated-token usage comes
 from accepted output token IDs, including a stop token whose decoded text may be withheld.
+
+## Aggregate Vision budgets
+
+`--vision-max-attention-pairs N` (default 134217728) and `--vision-max-media-items N` (default 16) bound preprocessing work across the complete image/video history. For screenshot-heavy sessions, `--vision-max-attention-pairs 4294967296 --vision-max-media-items 128` raises these limits. The independent raw-patch and request-body memory limits still apply; this does not reserve more Vision GPU workspace or guarantee that 128 high-resolution images fit. Keep limits fixed for a running service so old media geometry stays stable. Token-count endpoints enforce the same limits.
+
+The raw-patch cap is 262,144 (at most 1.5 GiB of retained FP32 patch features per request). Account for concurrent preprocessors, decoded media and host KV caches when increasing the aggregate work budget.

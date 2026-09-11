@@ -594,7 +594,8 @@ DecoderState terminal_state(DecoderState state) {
 class Frontend::Impl {
 public:
     Impl(const FrontendResources& resources, bool registered_checkpoint, bool vision_enabled_,
-         std::uint32_t vision_max_tokens_)
+         std::uint32_t vision_max_tokens_, std::uint64_t max_attention_pairs,
+         std::uint32_t max_media_items)
         : chat_template(compile_chat_template(resources)),
           tokenizer(std::make_shared<const fi::Tokenizer>(
               fi::TokenizerResources{.tokenizer_json         = resources.tokenizer_json,
@@ -605,6 +606,11 @@ public:
         // budget in lockstep so oversized media fails as MediaBudgetExceeded before it
         // reaches the encoder.
         if (vision_max_tokens_ > 0) { processor.max_vision_tokens = vision_max_tokens_; }
+        if (max_attention_pairs == 0 || max_media_items == 0) {
+            throw std::invalid_argument("Vision aggregate budgets must be positive");
+        }
+        processor.max_attention_pairs = max_attention_pairs;
+        processor.max_media_items     = max_media_items;
         if (registered_checkpoint) { validate_registered_tokenizer(*tokenizer); }
         for (const int token : tokenizer->default_stop_token_ids()) {
             if (!tokenizer->is_valid_token(token)) {
@@ -812,16 +818,18 @@ Frontend& Frontend::operator=(Frontend&&) noexcept = default;
 Frontend::~Frontend()                              = default;
 
 Frontend make_frontend(const FrontendResources& resources, bool vision_enabled,
-                       std::uint32_t vision_max_tokens) {
-    return Frontend(
-        std::make_shared<const Frontend::Impl>(resources, true, vision_enabled, vision_max_tokens));
+                       std::uint32_t vision_max_tokens, std::uint64_t max_attention_pairs,
+                       std::uint32_t max_media_items) {
+    return Frontend(std::make_shared<const Frontend::Impl>(
+        resources, true, vision_enabled, vision_max_tokens, max_attention_pairs, max_media_items));
 }
 
 Frontend FrontendTestAccess::create_component(const FrontendResources& resources,
-                                              bool vision_enabled,
-                                              std::uint32_t vision_max_tokens) {
-    return Frontend(std::make_shared<const Frontend::Impl>(resources, false, vision_enabled,
-                                                           vision_max_tokens));
+                                              bool vision_enabled, std::uint32_t vision_max_tokens,
+                                              std::uint64_t max_attention_pairs,
+                                              std::uint32_t max_media_items) {
+    return Frontend(std::make_shared<const Frontend::Impl>(
+        resources, false, vision_enabled, vision_max_tokens, max_attention_pairs, max_media_items));
 }
 
 const PreparedPromptData& PreparedPromptAccess::view(const PreparedPrompt& prompt) {

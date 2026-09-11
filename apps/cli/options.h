@@ -27,7 +27,10 @@ struct Options {
     SpeculativeOptions speculative;
     bool enable_vision              = false;
     std::uint32_t vision_max_tokens = 8192;
-    bool use_cuda_graph             = true;
+    // Aggregate preprocessing work across all images/videos in one request.
+    std::uint64_t vision_max_attention_pairs = 128ULL << 20;
+    std::uint32_t vision_max_media_items     = 16;
+    bool use_cuda_graph                      = true;
 
     bool raw_output      = false;
     bool print_token_ids = false;
