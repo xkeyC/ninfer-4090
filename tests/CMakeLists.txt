@@ -172,6 +172,17 @@ ninfer_add_test(ninfer_bench_support_test
 target_include_directories(ninfer_bench_support_test PRIVATE ${PROJECT_SOURCE_DIR}/bench/targets/qwen3_6_27b)
 
 # Shared Op numerical tests. Target-composed schedule tests are registered separately below.
+ninfer_add_test(ninfer_yarn_parameters_test
+  SOURCES test_yarn_parameters.cpp
+  NEEDS_SOURCE_DIR
+  LIBRARIES ninfer_ops)
+ninfer_add_test(ninfer_rope_scaling_options_test
+  SOURCES test_rope_scaling_options.cpp ${PROJECT_SOURCE_DIR}/apps/cli/options.cpp
+  LIBRARIES ninfer_serve)
+target_include_directories(ninfer_rope_scaling_options_test PRIVATE ${PROJECT_SOURCE_DIR})
+ninfer_add_op_test(ninfer_rope_yarn_test
+  SOURCES ops/test_rope_yarn.cpp
+  LIBRARIES ninfer_ops)
 set(ninfer_op_tests
   add_bias
   gelu

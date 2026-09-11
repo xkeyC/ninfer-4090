@@ -11,6 +11,14 @@ This fork targets `sm_89` and Linux. Blackwell-only NVFP4/W4A4 execution is unav
 engine uses the same groupwise-int path as the 3090 base. The Windows path and the
 Qwen3.6-35B-A3B target are inherited but untested on the RTX 4090.
 
+## Optional YaRN for Qwen3.8-27B
+
+`--rope-yarn-factor 1.5 --rope-original-max-position 262144 --max-context 393216`
+extends the per-request window using Qwen's published static YaRN recipe. Native behavior is
+the default (`--rope-yarn-factor 1`). Text, MTP and multimodal MRoPE share per-Program
+coefficients; the Vision tower stays native. See [serving](docs/serving.md#yarn-context-extension)
+for cache compatibility and validation scope.
+
 ## Long-context multi-session cache
 
 This fork adds a process-local host block cache for long agent conversations that outlive GPU KV

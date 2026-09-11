@@ -1,5 +1,6 @@
 #include "serve/serve_options.h"
 #include "product/speculative_options.h"
+#include "runtime/contract/yarn.h"
 
 #include <cerrno>
 #include <cstdint>
@@ -79,7 +80,8 @@ std::string serve_usage_text(const char* argv0) {
            "[--kv-dtype bf16|int8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8] [--spec mtp|dflash --draft-tokens "
            "N] "
            "[--default-max-tokens N] "
-           "[--vision] [--vision-max-tokens N] [--vision-max-attention-pairs N] "
+           "[--rope-yarn-factor F] [--rope-original-max-position N] [--vision] "
+           "[--vision-max-tokens N] [--vision-max-attention-pairs N] "
            "[--vision-max-media-items N] [--no-cuda-graph] [--no-prefix-reuse] "
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] [--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
@@ -160,6 +162,12 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             if (options.model_id_override->empty()) {
                 throw std::invalid_argument("--model-id must not be empty");
             }
+        } else if (arg == "--rope-yarn-factor") {
+            options.yarn.factor =
+                parse_float_in(require_value(arg.c_str()), arg.c_str(), 1.0F, 4.0F);
+        } else if (arg == "--rope-original-max-position") {
+            options.yarn.original_context = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value(arg.c_str()), arg.c_str()));
         } else if (arg == "--max-context") {
             options.max_context = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--max-context"), "max-context"));
@@ -335,6 +343,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     if (options.prefill_chunk == 0 || options.prefill_chunk % 128 != 0) {
         throw std::invalid_argument("--prefill-chunk must be a positive multiple of 128");
     }
+    runtime::validate_yarn(options.yarn, options.max_context);
     product::validate_speculative_cli_options(options.speculative);
     if (options.speculative.backend == SpeculativeBackend::DFlash && options.enable_vision) {
         throw std::invalid_argument("--spec dflash cannot be combined with --vision");

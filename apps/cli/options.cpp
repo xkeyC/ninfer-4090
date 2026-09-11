@@ -1,5 +1,6 @@
 #include "options.h"
 #include "product/speculative_options.h"
+#include "runtime/contract/yarn.h"
 
 #include <cerrno>
 #include <cmath>
@@ -88,7 +89,8 @@ std::string usage_text(const char* argv0) {
            "       [--presence-penalty F] [--frequency-penalty F] [--seed N] [--greedy]\n"
            "       [--stop-token-id N]... [--stop <text>]... [--reasoning-stop <text>]...\n"
            "       [--raw-output] [--print-token-ids] [--no-thinking]\n"
-           "       [--reasoning-effort low|medium|xhigh] [--vision] [--vision-max-tokens N] "
+           "       [--reasoning-effort low|medium|xhigh] [--rope-yarn-factor F] "
+           "[--rope-original-max-position N] [--vision] [--vision-max-tokens N] "
            "[--vision-max-attention-pairs N] [--vision-max-media-items N]\n"
            "       [--no-cuda-graph]\n"
            "\n"
@@ -127,6 +129,10 @@ Options parse_options(int argc, char** argv) {
             options.messages_path = value(arg);
         } else if (arg == "--max-new") {
             options.max_new = parse_u32(value(arg), "max-new");
+        } else if (arg == "--rope-yarn-factor") {
+            options.yarn.factor = parse_float(value(arg), arg, 1.0F, 4.0F);
+        } else if (arg == "--rope-original-max-position") {
+            options.yarn.original_context = parse_u32(value(arg), arg);
         } else if (arg == "--max-context") {
             options.max_context = parse_u32(value(arg), "max-context");
         } else if (arg == "--kv-capacity") {
@@ -224,6 +230,7 @@ Options parse_options(int argc, char** argv) {
         options.kv_capacity.explicit_tokens < options.max_context) {
         throw std::invalid_argument("--kv-capacity must be at least --max-context");
     }
+    runtime::validate_yarn(options.yarn, options.max_context);
     product::validate_speculative_cli_options(options.speculative);
     if (options.speculative.backend == SpeculativeBackend::DFlash && options.enable_vision) {
         throw std::invalid_argument("--spec dflash cannot be combined with --vision");

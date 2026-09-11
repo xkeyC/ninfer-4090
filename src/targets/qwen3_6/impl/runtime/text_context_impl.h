@@ -382,7 +382,7 @@ void TextContext::mtp_forward_tail(Tensor& x, const Tensor& ah, const Tensor& po
     ops::rmsnorm(q, *mtp_.q_norm, kCfg.rms_eps, true, qn, s);
     ops::rmsnorm(k, *mtp_.k_norm, kCfg.rms_eps, true, kn, s);
     Tensor rope_for_op = active_sequence_batch_ != 0 ? rope_positions.view({T}) : rope_positions;
-    ops::rope(rope_for_op, kCfg.rotary_dim, kCfg.rope_theta, qn, kn, s);
+    ops::rope(rope_for_op, kCfg.rotary_dim, kCfg.rope_theta, qn, kn, s, rope_scaling_);
 
     Tensor a = results.attention.view({kCfg.head_dim, kCfg.n_q, T});
     if (active_sequence_batch_ != 0) {
@@ -486,7 +486,7 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
         Tensor v  = v_flat.view({kCfg.head_dim, kCfg.n_kv, T});
         Tensor kn = work_.alloc(DType::BF16, {kCfg.head_dim, kCfg.n_kv, T});
         ops::rmsnorm(k, *mtp_.k_norm, kCfg.rms_eps, true, kn, s);
-        ops::rope(rope_positions, kCfg.rotary_dim, kCfg.rope_theta, kn, s);
+        ops::rope(rope_positions, kCfg.rotary_dim, kCfg.rope_theta, kn, s, rope_scaling_);
         ops::gqa_kv_append(kn, v, positions, mtp_kv_.layer_view(0), s);
 
         if (final_chunk) {
@@ -526,7 +526,7 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
                     cudaMemcpyAsync(dst, src, sizeof(std::int32_t), cudaMemcpyDeviceToDevice, s));
             }
         }
-        ops::rope(last_rope_position, kCfg.rotary_dim, kCfg.rope_theta, qn, s);
+        ops::rope(last_rope_position, kCfg.rotary_dim, kCfg.rope_theta, qn, s, rope_scaling_);
 
         Tensor a = work_.alloc(DType::BF16, {kCfg.head_dim, kCfg.n_q, 1});
         ops::gqa_attention_cached(qn, last_position, kAttnScale, mtp_kv_.layer_view(0), envelope,
@@ -821,7 +821,7 @@ void TextContext::attn_mix(const FullLayerW& w, Tensor& x, int fidx, Phase ph) {
     const Tensor& rope_positions =
         active_rope_positions_ != nullptr ? *active_rope_positions_ : io_.rope_pos;
     Tensor rope_for_op = active_sequence_batch_ != 0 ? rope_positions.view({T}) : rope_positions;
-    ops::rope(rope_for_op, kCfg.rotary_dim, kCfg.rope_theta, qn, kn, s);
+    ops::rope(rope_for_op, kCfg.rotary_dim, kCfg.rope_theta, qn, kn, s, rope_scaling_);
 
     Tensor a = results.attention.view({kCfg.head_dim, kCfg.n_q, T});
     const Tensor& kv_table_rows =

@@ -282,6 +282,7 @@ int main(int argc, char** argv) {
         engine_options.prefill_chunk              = cli.prefill_chunk;
         engine_options.kv_cache                   = cli.kv_cache;
         engine_options.speculative                = cli.speculative;
+        engine_options.yarn                       = cli.yarn;
         engine_options.enable_vision              = cli.enable_vision;
         engine_options.vision_max_tokens          = cli.vision_max_tokens;
         engine_options.vision_max_attention_pairs = cli.vision_max_attention_pairs;

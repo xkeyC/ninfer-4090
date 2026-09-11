@@ -10,6 +10,7 @@
 #include "core/tensor.h"
 #include "core/weight.h"
 #include "ninfer/ops/sampling.h"
+#include "ninfer/ops/rope.h"
 #include "ninfer/ops/gqa_attention.h"
 #include <ninfer/targets/qwen3_6/decoder_state.h>
 #include <ninfer/targets/qwen3_6/prepared_prompt.h>
@@ -160,6 +161,8 @@ public:
                 const qwen3_6::PagedKVCache* batch_mtp_kv  = nullptr);
     ~TextContext();
 
+    void set_rope_scaling(const ops::TextRopeScaling* value) noexcept { rope_scaling_ = value; }
+
     TextContext(const TextContext&)            = delete;
     TextContext& operator=(const TextContext&) = delete;
 
@@ -231,6 +234,7 @@ public:
                              const Tensor& position, ops::GqaExecutionEnvelope envelope,
                              Tensor& mtp_hidden, Tensor& logits, Tensor& draft_token);
 private:
+    const ops::TextRopeScaling* rope_scaling_ = nullptr;
     void bind();
 
     [[nodiscard]] bool mtp_enabled() const noexcept {

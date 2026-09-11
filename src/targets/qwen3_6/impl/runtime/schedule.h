@@ -39,6 +39,7 @@ struct ExecutionCore {
     Tensor& prefill_hidden;
     std::uint32_t prefill_chunk;
     ProposalHead proposal_head;
+    const ops::TextRopeScaling* rope_scaling = nullptr;
 };
 
 struct PrefillContext {

@@ -30,8 +30,8 @@ using Clock = std::chrono::steady_clock;
 // the same hash over the prefix its frontier covers (session_snapshot_impl.h calls through
 // here for the full ledger).
 std::string ledger_prefix_digest(std::span<const TokenId> ledger) {
-    std::uint64_t hash = 1469598103934665603ULL;
-    const auto* bytes  = reinterpret_cast<const unsigned char*>(ledger.data());
+    std::uint64_t hash      = 1469598103934665603ULL;
+    const auto* bytes       = reinterpret_cast<const unsigned char*>(ledger.data());
     const std::size_t count = ledger.size() * sizeof(TokenId);
     for (std::size_t index = 0; index < count; ++index) {
         hash = (hash ^ bytes[index]) * 1099511628211ULL;
@@ -198,14 +198,14 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
 
 ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const SequencePlanImpl& plan,
                                  DeviceContext& device_in)
-    : model(model_in), device(device_in), capacity(plan.capacity), kv_capacity(plan.kv_capacity),
-      max_concurrency(plan.max_concurrency), prefill_chunk(plan.prefill_chunk),
-      draft_window(plan.draft_window), speculative_backend(plan.speculative_backend),
-      kv_dtype(plan.kv_dtype), kv_quant_group(plan.kv_quant_group),
-      kv_packed_v(plan.kv_packed_v), kv_rotate_k(plan.kv_rotate_k), kv_rotate_v(plan.kv_rotate_v),
-      kv_packed_k(plan.kv_packed_k), kv_e8_lattice(plan.kv_e8_lattice), kv_e8_root(plan.kv_e8_root),
-      proposal_head(plan.proposal_head),
-      vision_enabled(plan.features.vision),
+    : model(model_in), rope_scaling(plan.rope_scaling), device(device_in), capacity(plan.capacity),
+      kv_capacity(plan.kv_capacity), max_concurrency(plan.max_concurrency),
+      prefill_chunk(plan.prefill_chunk), draft_window(plan.draft_window),
+      speculative_backend(plan.speculative_backend), kv_dtype(plan.kv_dtype),
+      kv_quant_group(plan.kv_quant_group), kv_packed_v(plan.kv_packed_v),
+      kv_rotate_k(plan.kv_rotate_k), kv_rotate_v(plan.kv_rotate_v), kv_packed_k(plan.kv_packed_k),
+      kv_e8_lattice(plan.kv_e8_lattice), kv_e8_root(plan.kv_e8_root),
+      proposal_head(plan.proposal_head), vision_enabled(plan.features.vision),
       use_cuda_graph(plan.use_cuda_graph), checkpoint_ring_capacity(plan.turn_checkpoint_ring),
       kv_payload_bytes(plan.persistent.kv_payload_bytes),
       text_kv_bytes(plan.persistent.decoder.text_kv.payload_bytes()),
@@ -213,9 +213,8 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
                                                   : 0),
       gdn_state_bytes(plan.persistent.decoder.linear_attention.payload_bytes()),
       dflash_kv_bytes(plan.persistent.dflash ? plan.persistent.dflash->kv_payload_bytes() : 0),
-      replay_records_bytes(plan.persistent.replay_records
-                               ? plan.persistent.replay_records->payload_bytes()
-                               : 0),
+      replay_records_bytes(
+          plan.persistent.replay_records ? plan.persistent.replay_records->payload_bytes() : 0),
       graph_allowance_bytes(plan.graph_allowance_bytes), workspace_plan(plan.workspace),
       persistent(plan.persistent.bytes), workspace_storage(plan.workspace.capacity),
       work(DeviceSpan{workspace_storage.base(), workspace_storage.capacity()}),
@@ -299,8 +298,8 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
         }
         checkpoint_staging_store.emplace(checkpoint_entry_bytes() * max_concurrency);
         for (std::uint32_t lane = 0; lane < max_concurrency; ++lane) {
-            CUDA_CHECK(cudaEventCreateWithFlags(&checkpoint_staging_events[lane],
-                                                cudaEventDisableTiming));
+            CUDA_CHECK(
+                cudaEventCreateWithFlags(&checkpoint_staging_events[lane], cudaEventDisableTiming));
         }
     }
 
@@ -514,8 +513,7 @@ runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lan
                 discard_checkpoint_staging(sequence);
                 sequence.checkpoint_ring.clear();
             } else {
-                if (checkpoint_staging[lane].pending &&
-                    checkpoint_staging[lane].frontier <= base) {
+                if (checkpoint_staging[lane].pending && checkpoint_staging[lane].frontier <= base) {
                     drain_checkpoint_staging(sequence);
                 } else {
                     discard_checkpoint_staging(sequence);
@@ -906,7 +904,7 @@ void ProgramImplCore::clear_lane(SequenceState& sequence, RequestControl& reques
     sequence.turn_checkpoint         = {};
     sequence.checkpoint_ring.clear();
     discard_checkpoint_staging(sequence);
-    request.pending                  = {};
+    request.pending = {};
 }
 
 std::size_t ProgramImplCore::checkpoint_hidden_bytes() const noexcept {
@@ -947,9 +945,9 @@ void ProgramImplCore::stage_turn_checkpoint(SequenceState& sequence) {
     const LinearAttentionStatePool& states = decoder->linear_attention;
     const std::int32_t checkpoint_slot =
         LinearStateSlots::turn_checkpoint_state_slot(lane, max_concurrency);
-    std::uint8_t* base       = checkpoint_staging_base(lane);
-    std::uint8_t* conv       = base + checkpoint_hidden_bytes();
-    std::uint8_t* recurrent  = conv + checkpoint_conv_bytes();
+    std::uint8_t* base      = checkpoint_staging_base(lane);
+    std::uint8_t* conv      = base + checkpoint_hidden_bytes();
+    std::uint8_t* recurrent = conv + checkpoint_conv_bytes();
     CUDA_CHECK(cudaMemcpyAsync(base, sequence.turn_checkpoint_hidden.data,
                                checkpoint_hidden_bytes(), cudaMemcpyDeviceToHost, device.stream));
     for (std::uint32_t layer = 0; layer < states.layer_count(); ++layer) {
@@ -962,10 +960,10 @@ void ProgramImplCore::stage_turn_checkpoint(SequenceState& sequence) {
                                    cudaMemcpyDeviceToHost, device.stream));
     }
     CUDA_CHECK(cudaEventRecord(checkpoint_staging_events[lane], device.stream));
-    staging.frontier       = frontier;
-    staging.session_digest = ledger_prefix_digest(
-        std::span<const TokenId>(sequence.ledger.data(), frontier));
-    staging.pending        = true;
+    staging.frontier = frontier;
+    staging.session_digest =
+        ledger_prefix_digest(std::span<const TokenId>(sequence.ledger.data(), frontier));
+    staging.pending = true;
 }
 
 // Folds the staged checkpoint into the lane's host ring once its copy has completed. Callers
@@ -978,8 +976,8 @@ void ProgramImplCore::drain_checkpoint_staging(SequenceState& sequence) {
     CUDA_CHECK(cudaEventSynchronize(checkpoint_staging_events[sequence.lane]));
 
     HostTurnCheckpoint entry;
-    entry.frontier       = staging.frontier;
-    entry.session_digest = std::move(staging.session_digest);
+    entry.frontier           = staging.frontier;
+    entry.session_digest     = std::move(staging.session_digest);
     const std::uint8_t* base = checkpoint_staging_base(sequence.lane);
     entry.hidden.assign(base, base + checkpoint_hidden_bytes());
     base += checkpoint_hidden_bytes();
@@ -1004,9 +1002,8 @@ void ProgramImplCore::invalidate_checkpoint_ring(SequenceState& sequence,
 // until the configured capacity holds. The newest entry always survives compaction.
 void ProgramImplCore::append_ring_checkpoint(SequenceState& sequence, HostTurnCheckpoint&& entry) {
     std::vector<HostTurnCheckpoint>& ring = sequence.checkpoint_ring;
-    std::erase_if(ring, [&](const HostTurnCheckpoint& held) {
-        return held.frontier == entry.frontier;
-    });
+    std::erase_if(ring,
+                  [&](const HostTurnCheckpoint& held) { return held.frontier == entry.frontier; });
     std::uint32_t previous_kept = 0;
     std::erase_if(ring, [&](const HostTurnCheckpoint& held) {
         if (previous_kept != 0 && held.frontier <= previous_kept + kTurnCheckpointMinStep) {
@@ -1023,9 +1020,9 @@ void ProgramImplCore::append_ring_checkpoint(SequenceState& sequence, HostTurnCh
 // RestoreTurnCheckpoint path can proceed as if the checkpoint had stayed resident.
 bool ProgramImplCore::upload_ring_checkpoint(SequenceState& sequence, std::uint32_t frontier) {
     if (checkpoint_ring_capacity == 0) { return false; }
-    const auto entry = std::find_if(
-        sequence.checkpoint_ring.begin(), sequence.checkpoint_ring.end(),
-        [&](const HostTurnCheckpoint& held) { return held.frontier == frontier; });
+    const auto entry =
+        std::find_if(sequence.checkpoint_ring.begin(), sequence.checkpoint_ring.end(),
+                     [&](const HostTurnCheckpoint& held) { return held.frontier == frontier; });
     if (entry == sequence.checkpoint_ring.end() || entry->frontier == 0 ||
         entry->hidden.size() != checkpoint_hidden_bytes() ||
         entry->conv.size() != checkpoint_conv_bytes() ||
@@ -1040,14 +1037,12 @@ bool ProgramImplCore::upload_ring_checkpoint(SequenceState& sequence, std::uint3
                                entry->hidden.size(), cudaMemcpyHostToDevice, device.stream));
     for (std::uint32_t layer = 0; layer < states.layer_count(); ++layer) {
         const Tensor conv_state = states.conv_slot(layer, checkpoint_slot);
-        CUDA_CHECK(cudaMemcpyAsync(conv_state.data,
-                                   entry->conv.data() + layer * conv_state.bytes(),
+        CUDA_CHECK(cudaMemcpyAsync(conv_state.data, entry->conv.data() + layer * conv_state.bytes(),
                                    conv_state.bytes(), cudaMemcpyHostToDevice, device.stream));
         const Tensor recurrent_state = states.recurrent_slot(layer, checkpoint_slot);
         CUDA_CHECK(cudaMemcpyAsync(recurrent_state.data,
                                    entry->recurrent.data() + layer * recurrent_state.bytes(),
-                                   recurrent_state.bytes(), cudaMemcpyHostToDevice,
-                                   device.stream));
+                                   recurrent_state.bytes(), cudaMemcpyHostToDevice, device.stream));
     }
     sequence.turn_checkpoint = TurnCheckpoint{.valid = true, .frontier = frontier};
     return true;
@@ -1398,7 +1393,8 @@ void ProgramImplCore::prepare_graphs() {
                                        io,
                                        prefill_hidden,
                                        prefill_chunk,
-                                       proposal_head};
+                                       proposal_head,
+                                       &rope_scaling};
     };
 
     if (speculative_backend == SpeculativeBackend::None) {
@@ -1661,7 +1657,8 @@ void ProgramImplCore::enqueue_dflash_context_append(std::span<const std::uint32_
 
     schedule::DFlashAppendContext state{{device, model, work, decoder->linear_attention,
                                          replay_records ? &*replay_records : nullptr, io,
-                                         prefill_hidden, prefill_chunk, proposal_head},
+                                         prefill_hidden, prefill_chunk, proposal_head,
+                                         &rope_scaling},
                                         *dflash};
     mark_workspace_usage(workspace_plan.dflash_context);
     schedule::dflash_append_context(state, features, positions, device_counts, lane_tensor,
@@ -1694,7 +1691,7 @@ runtime::PrefillStepResult ProgramImplCore::advance_prefill(SequenceState& seque
         schedule::PrefillContext schedule_state{
             {device, model, work, decoder->linear_attention,
              replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
-             proposal_head},
+             proposal_head, &rope_scaling},
             text_kv_view(sequence),
             mtp_kv_view(sequence),
             decoder->text_kv,
@@ -1958,7 +1955,7 @@ ProgramImplCore::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
         schedule::OrdinaryBatchContext schedule_state{
             {device, model, work, decoder->linear_attention,
              replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
-             proposal_head},
+             proposal_head, &rope_scaling},
             decoder->text_kv,
             *io.ordinary,
             *ordinary_host_ingress,
@@ -2089,7 +2086,8 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
 
         schedule::MtpBatchContext schedule_state{{device, model, work, decoder->linear_attention,
                                                   replay_records ? &*replay_records : nullptr, io,
-                                                  prefill_hidden, prefill_chunk, proposal_head},
+                                                  prefill_hidden, prefill_chunk, proposal_head,
+                                                  &rope_scaling},
                                                  decoder->text_kv,
                                                  *decoder->mtp_cache(),
                                                  *io.mtp_decode,
@@ -2251,7 +2249,7 @@ ProgramImplCore::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         schedule::DFlashBatchContext schedule_state{{device, model, work, decoder->linear_attention,
                                                      replay_records ? &*replay_records : nullptr,
                                                      io, prefill_hidden, prefill_chunk,
-                                                     proposal_head},
+                                                     proposal_head, &rope_scaling},
                                                     decoder->text_kv,
                                                     *dflash,
                                                     *io.dflash_decode,
@@ -2381,16 +2379,17 @@ MemorySummary ProgramImplCore::memory_summary() const noexcept {
     out.device      = device.device;
     out.max_context = capacity;
     out.kv_capacity = kv_capacity;
-    out.kv_cache = kv_dtype == DType::BF16
-                       ? KvCacheStorage::BFloat16
-                       : (kv_e8_root
-                              ? KvCacheStorage::RK2V4E8
-                              : (kv_e8_lattice
-                                     ? KvCacheStorage::RK4V4E8
-                                     : (kv_packed_k
-                                            ? KvCacheStorage::RotatedInt4KeyInt4ValueGroup64
-                                            : (kv_rotate_v ? KvCacheStorage::RotatedInt8KeyInt4ValueGroup64
-                                                           : KvCacheStorage::Int8Group64))));
+    out.kv_cache =
+        kv_dtype == DType::BF16
+            ? KvCacheStorage::BFloat16
+            : (kv_e8_root
+                   ? KvCacheStorage::RK2V4E8
+                   : (kv_e8_lattice
+                          ? KvCacheStorage::RK4V4E8
+                          : (kv_packed_k
+                                 ? KvCacheStorage::RotatedInt4KeyInt4ValueGroup64
+                                 : (kv_rotate_v ? KvCacheStorage::RotatedInt8KeyInt4ValueGroup64
+                                                : KvCacheStorage::Int8Group64))));
     DeviceArena& weights = *model.weights_arena;
     out.weights = ArenaMemorySummary{weights.capacity(), weights.used(), weights.peak_used()};
     out.sequence =

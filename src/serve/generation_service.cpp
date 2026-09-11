@@ -63,7 +63,7 @@ struct MediaInputPermit {
 
 namespace {
 
-using Clock                              = std::chrono::steady_clock;
+using Clock = std::chrono::steady_clock;
 
 [[noreturn]] void throw_preparation_cancelled();
 
@@ -282,6 +282,7 @@ GenerationService::GenerationService(ServeOptions options, LoadProgress load_pro
     engine_options.vision_max_media_items     = options_.vision_max_media_items;
     engine_options.use_cuda_graph             = options_.use_cuda_graph;
     engine_options.speculative                = options_.speculative;
+    engine_options.yarn                       = options_.yarn;
     engine_options.load_progress              = std::move(load_progress);
     engine_              = std::make_unique<ninfer::Engine>(std::move(engine_options));
     prompt_capabilities_ = engine_->prompt_capabilities();
@@ -367,10 +368,10 @@ PreparedRequest GenerationService::prepare(const GenerationRequest& request,
         throw_invalid_input(error, "vision_disabled");
     }
     if (media_items > options_.vision_max_media_items) {
-        throw_request_error(ninfer::RequestError(RequestErrorKind::MediaBudgetExceeded,
-                                                 "request exceeds the " +
-                                                     std::to_string(options_.vision_max_media_items) +
-                                                     "-item media limit"));
+        throw_request_error(ninfer::RequestError(
+            RequestErrorKind::MediaBudgetExceeded,
+            "request exceeds the " + std::to_string(options_.vision_max_media_items) +
+                "-item media limit"));
     }
     prepared.lifetime = acquire_request_lifetime();
     HostInputLease host_input;
@@ -409,10 +410,10 @@ int GenerationService::count_prompt_tokens(const GenerationRequest& request,
         throw_invalid_input(error, "vision_disabled");
     }
     if (media_items > options_.vision_max_media_items) {
-        throw_request_error(ninfer::RequestError(RequestErrorKind::MediaBudgetExceeded,
-                                                 "request exceeds the " +
-                                                     std::to_string(options_.vision_max_media_items) +
-                                                     "-item media limit"));
+        throw_request_error(ninfer::RequestError(
+            RequestErrorKind::MediaBudgetExceeded,
+            "request exceeds the " + std::to_string(options_.vision_max_media_items) +
+                "-item media limit"));
     }
     const Clock::time_point deadline =
         Clock::now() + std::chrono::milliseconds(options_.pending_timeout_ms);
