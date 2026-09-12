@@ -5,10 +5,13 @@
 namespace ninfer::targets::qwen3_6 {
 
 struct StartupFeatures {
-    bool vision                    = false;
+    bool vision                     = false;
     std::uint32_t vision_max_tokens = 8192;
-    SpeculativeBackend speculative = SpeculativeBackend::None;
-    ProposalHead proposal_head     = ProposalHead::Full;
+    // Aggregate preprocessing work across all images/videos in one request.
+    std::uint64_t vision_max_attention_pairs = 128ULL << 20;
+    std::uint32_t vision_max_media_items     = 16;
+    SpeculativeBackend speculative           = SpeculativeBackend::None;
+    ProposalHead proposal_head               = ProposalHead::Full;
 
     bool operator==(const StartupFeatures&) const = default;
 
@@ -29,8 +32,10 @@ struct StartupFeatures {
     return StartupFeatures{
         .vision            = options.enable_vision,
         .vision_max_tokens = options.vision_max_tokens > 0 ? options.vision_max_tokens : 8192,
-        .speculative       = options.speculative.backend,
-        .proposal_head     = options.speculative.proposal_head,
+        .vision_max_attention_pairs = options.vision_max_attention_pairs,
+        .vision_max_media_items     = options.vision_max_media_items,
+        .speculative                = options.speculative.backend,
+        .proposal_head              = options.speculative.proposal_head,
     };
 }
 

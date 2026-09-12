@@ -67,6 +67,13 @@ struct SpeculativeOptions {
     ProposalHead proposal_head = ProposalHead::Full;
 };
 
+// Static YaRN for the registered Qwen3.8 text/MTP rotary geometry. Factor 1 preserves
+// native RoPE. The reference window is a model property, independent of KV capacity.
+struct YarnOptions {
+    float factor                   = 1.0F;
+    std::uint32_t original_context = 262144;
+};
+
 struct LoadProgress {
     std::function<void(std::string_view phase, std::uint64_t done, std::uint64_t total)> callback;
 };
@@ -113,9 +120,13 @@ struct EngineOptions {
     std::function<void(const SlotAutoSaveEvent&)> auto_save_listener;
     KvCacheStorage kv_cache = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
+    YarnOptions yarn;
     bool enable_vision              = false;
     std::uint32_t vision_max_tokens = 8192;
-    bool use_cuda_graph             = true;
+    // Aggregate preprocessing work across all images/videos in one request.
+    std::uint64_t vision_max_attention_pairs = 128ULL << 20;
+    std::uint32_t vision_max_media_items     = 16;
+    bool use_cuda_graph                      = true;
     LoadProgress load_progress;
 };
 

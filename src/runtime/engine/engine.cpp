@@ -3,6 +3,7 @@
 #include "core/device.h"
 #include "runtime/contract/sampling.h"
 #include "runtime/contract/types.h"
+#include "runtime/contract/yarn.h"
 #include "runtime/engine/concurrent_executor.h"
 #include "targets/registry.h"
 
@@ -131,8 +132,9 @@ GenerationResult GenerationHandle::wait(OutputSink* sink, const CancellationView
 
 namespace {
 
-std::string slot_model_binding(const LoadSummary& load) {
-    return load.target + '\n' + load.model_id + '\n' + load.weights_id;
+std::string slot_model_binding(const LoadSummary& load, const EngineOptions& options) {
+    return load.target + '\n' + load.model_id + '\n' + load.weights_id +
+           runtime::yarn_cache_binding(options.yarn);
 }
 
 } // namespace
@@ -162,7 +164,7 @@ public:
             },
             active);
         if (options.host_prefix_cache_bytes != 0) {
-            const std::string binding = slot_model_binding(load);
+            const std::string binding = slot_model_binding(load, options);
             std::visit(
                 [&](auto& constructed_executor) {
                     using ExecutorPtr = std::remove_cvref_t<decltype(constructed_executor)>;
@@ -178,7 +180,7 @@ public:
                     using ExecutorPtr = std::remove_cvref_t<decltype(constructed_executor)>;
                     if constexpr (!std::is_same_v<ExecutorPtr, std::monostate>) {
                         constructed_executor->set_eviction_sink(
-                            slot_model_binding(load),
+                            slot_model_binding(load, options),
                             [this](std::string path,
                                    targets::qwen3_6::RetainedSessionSnapshot&& snapshot) {
                                 enqueue_write(std::move(path), std::move(snapshot));
@@ -500,7 +502,7 @@ SlotSaveResult Engine::save_slot(std::uint32_t lane, const std::string& path,
     const auto started = std::chrono::steady_clock::now();
     // A pending auto-save of the same path must not land after this explicit save.
     impl_->drain_writes();
-    const std::string binding                          = slot_model_binding(impl_->load);
+    const std::string binding = slot_model_binding(impl_->load, impl_->options);
     targets::qwen3_6::RetainedSessionSnapshot snapshot = std::visit(
         [&](auto& executor) -> targets::qwen3_6::RetainedSessionSnapshot {
             using Executor = std::remove_cvref_t<decltype(executor)>;
@@ -539,7 +541,7 @@ SlotRestoreResult Engine::restore_slot(std::uint32_t lane, const std::string& pa
     if (!file.good()) { throw std::invalid_argument("failed to read session snapshot file"); }
     file.close();
 
-    const std::string binding = slot_model_binding(impl_->load);
+    const std::string binding = slot_model_binding(impl_->load, impl_->options);
     auto restored             = std::visit(
         [&](auto& executor) -> std::pair<std::uint32_t, std::string> {
             using Executor = std::remove_cvref_t<decltype(executor)>;

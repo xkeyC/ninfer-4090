@@ -45,6 +45,20 @@ int main() {
     failures += check(defaults.kv_affinity_burst == 5 && defaults.kv_affinity_grace_ms == 1500,
                       "KV affinity defaults mismatch");
 
+    const ServeOptions media =
+        parse({"ninfer-serve", "model.ninfer", "--vision-max-attention-pairs", "4294967296",
+               "--vision-max-media-items", "128"});
+    failures += check(media.vision_max_attention_pairs == (1ULL << 32) &&
+                          media.vision_max_media_items == 128,
+                      "custom aggregate vision budgets were not applied");
+    for (const std::string flag : {"--vision-max-attention-pairs", "--vision-max-media-items"}) {
+        bool rejected = false;
+        try {
+            (void)parse({"ninfer-serve", "model.ninfer", flag, "0"});
+        } catch (const std::invalid_argument&) { rejected = true; }
+        failures += check(rejected, "zero aggregate vision budget was accepted");
+    }
+
     const ServeOptions ring = parse({"ninfer-serve", "model.ninfer", "--turn-checkpoints", "8"});
     failures += check(ring.turn_checkpoint_ring == 8, "--turn-checkpoints was not applied");
     failures += check(!ring.auto_save_evicted, "auto-save-evicted is not disabled by default");
@@ -53,9 +67,8 @@ int main() {
         parse({"ninfer-serve", "model.ninfer", "--host-prefix-cache-mib", "20480"});
     failures += check(host_cache.host_prefix_cache_bytes == (20480ULL << 20),
                       "--host-prefix-cache-mib was not applied");
-    const ServeOptions affinity =
-        parse({"ninfer-serve", "model.ninfer", "--kv-affinity-burst", "9",
-               "--kv-affinity-grace-ms", "750"});
+    const ServeOptions affinity = parse({"ninfer-serve", "model.ninfer", "--kv-affinity-burst", "9",
+                                         "--kv-affinity-grace-ms", "750"});
     failures += check(affinity.kv_affinity_burst == 9 && affinity.kv_affinity_grace_ms == 750,
                       "KV affinity options were not applied");
 
@@ -139,8 +152,8 @@ int main() {
                       "DFlash and the host prefix cache were accepted together");
     bool disabled_reuse_host_cache_rejected = false;
     try {
-        (void)parse({"ninfer-serve", "model.ninfer", "--host-prefix-cache-mib", "1",
-                     "--no-prefix-reuse"});
+        (void)parse(
+            {"ninfer-serve", "model.ninfer", "--host-prefix-cache-mib", "1", "--no-prefix-reuse"});
     } catch (const std::invalid_argument&) { disabled_reuse_host_cache_rejected = true; }
     failures += check(disabled_reuse_host_cache_rejected,
                       "host prefix cache was accepted with prefix reuse disabled");

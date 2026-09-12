@@ -1,5 +1,6 @@
 #include "serve/serve_options.h"
 #include "product/speculative_options.h"
+#include "runtime/contract/yarn.h"
 
 #include <cerrno>
 #include <cstdint>
@@ -79,7 +80,9 @@ std::string serve_usage_text(const char* argv0) {
            "[--kv-dtype bf16|int8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8] [--spec mtp|dflash --draft-tokens "
            "N] "
            "[--default-max-tokens N] "
-           "[--vision] [--vision-max-tokens N] [--no-cuda-graph] [--no-prefix-reuse] "
+           "[--rope-yarn-factor F] [--rope-original-max-position N] [--vision] "
+           "[--vision-max-tokens N] [--vision-max-attention-pairs N] "
+           "[--vision-max-media-items N] [--no-cuda-graph] [--no-prefix-reuse] "
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] [--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
            "[--frequency-penalty F] [--seed N] [--greedy]\n"
@@ -159,6 +162,12 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             if (options.model_id_override->empty()) {
                 throw std::invalid_argument("--model-id must not be empty");
             }
+        } else if (arg == "--rope-yarn-factor") {
+            options.yarn.factor =
+                parse_float_in(require_value(arg.c_str()), arg.c_str(), 1.0F, 4.0F);
+        } else if (arg == "--rope-original-max-position") {
+            options.yarn.original_context = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value(arg.c_str()), arg.c_str()));
         } else if (arg == "--max-context") {
             options.max_context = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--max-context"), "max-context"));
@@ -188,8 +197,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             }
             options.host_prefix_cache_bytes = static_cast<std::size_t>(mib << 20);
         } else if (arg == "--kv-affinity-burst") {
-            options.kv_affinity_burst = static_cast<std::uint32_t>(parse_nonnegative_int(
-                require_value("--kv-affinity-burst"), "kv-affinity-burst"));
+            options.kv_affinity_burst = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--kv-affinity-burst"), "kv-affinity-burst"));
         } else if (arg == "--kv-affinity-grace-ms") {
             options.kv_affinity_grace_ms = static_cast<std::uint32_t>(parse_nonnegative_int(
                 require_value("--kv-affinity-grace-ms"), "kv-affinity-grace-ms"));
@@ -245,6 +254,17 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             default_max_tokens_explicit = true;
         } else if (arg == "--vision") {
             options.enable_vision = true;
+        } else if (arg == "--vision-max-attention-pairs") {
+            options.vision_max_attention_pairs = parse_u64(require_value(arg.c_str()), arg.c_str());
+            if (options.vision_max_attention_pairs == 0) {
+                throw std::invalid_argument("--vision-max-attention-pairs must be positive");
+            }
+        } else if (arg == "--vision-max-media-items") {
+            const int val = parse_nonnegative_int(require_value(arg.c_str()), arg.c_str());
+            if (val == 0) {
+                throw std::invalid_argument("--vision-max-media-items must be positive");
+            }
+            options.vision_max_media_items = static_cast<std::uint32_t>(val);
         } else if (arg == "--vision-max-tokens" || arg == "--vision-limit") {
             const int val = parse_nonnegative_int(require_value(arg.c_str()), "vision-max-tokens");
             if (val <= 0) { throw std::invalid_argument(std::string(arg) + " must be positive"); }
@@ -323,6 +343,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     if (options.prefill_chunk == 0 || options.prefill_chunk % 128 != 0) {
         throw std::invalid_argument("--prefill-chunk must be a positive multiple of 128");
     }
+    runtime::validate_yarn(options.yarn, options.max_context);
     product::validate_speculative_cli_options(options.speculative);
     if (options.speculative.backend == SpeculativeBackend::DFlash && options.enable_vision) {
         throw std::invalid_argument("--spec dflash cannot be combined with --vision");

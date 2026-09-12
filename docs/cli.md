@@ -212,3 +212,21 @@ growth.
 
 All weight, sequence, workspace, request-transient, and graph allocations are released when the
 Engine is destroyed.
+
+## Aggregate Vision budgets
+
+`--vision-max-attention-pairs N` (default 134217728) and `--vision-max-media-items N` (default 16) bound preprocessing work across the complete image/video history. For screenshot-heavy sessions, `--vision-max-attention-pairs 4294967296 --vision-max-media-items 128` raises these limits. The independent raw-patch and request-body memory limits still apply; this does not reserve more Vision GPU workspace or guarantee that 128 high-resolution images fit. Keep limits fixed for a running service so old media geometry stays stable. Token-count endpoints enforce the same limits.
+
+The raw-patch cap is 262,144 (at most 1.5 GiB of retained FP32 patch features per request). Account for concurrent preprocessors, decoded media and host KV caches when increasing the aggregate work budget.
+
+## YaRN context extension
+
+Qwen3.8-27B supports optional static YaRN through `--rope-yarn-factor F` (1 to 4, default 1) and `--rope-original-max-position 262144`. Factor 1 uses the unchanged native RoPE path. The reference window is 262,144 even though this fork has a larger compiled attention-address envelope. With YaRN enabled, `--max-context` must not exceed `262144 * F`; a 1.5x profile uses `--max-context 393216`. Size `--kv-capacity` separately for all active and retained sessions.
+
+The implementation follows Qwen's published `rope_parameters` and Hugging Face Transformers YaRN: theta 10,000,000, rotary dimension 64 of a 256-dimensional head, beta_fast 32, beta_slow 1, floor/ceil frequency-ramp boundaries, and cos/sin amplitude `1 + 0.1 * ln(F)`. Main Text, MTP and three-axis MRoPE use the same immutable, per-Program coefficients. The Vision tower's independent 2-D RoPE stays native. No model conversion or weight download is needed.
+
+Coefficients are CUDA launch/graph values rather than process-global mutable device symbols. Saved slots and host-cache manifests bind to the YaRN algorithm version, factor and original window: snapshots made under native RoPE or another factor must not be restored into a scaled Engine. Reuse the original full conversation to rebuild its state after changing the factor.
+
+This option is currently restricted to registered Qwen3.8-27B artifacts. Static YaRN may change short-context output; successful memory allocation is not evidence of long-context quality. Test the intended retrieval, vision and generation workload before relying on the extended window.
+
+References: [Qwen3.8-27B official parameters](https://huggingface.co/Qwen/Qwen3.8-27B#best-practices), [Transformers YaRN reference](https://github.com/huggingface/transformers/blob/main/src/transformers/modeling_rope_utils.py), and [splickz's NInfer YaRN work](https://github.com/splickz/ninfer-yarn-nvfp4). The latter informed the integration review; this implementation keeps coefficients owned by each Program rather than installing global CUDA tables.

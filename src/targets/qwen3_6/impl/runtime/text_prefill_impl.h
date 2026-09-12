@@ -61,6 +61,7 @@ PrefillChunkResult prefill_text_chunk(PrefillContext& state, std::span<const Tok
                      state.text_kv, state.execution.linear_attention, state.execution.io,
                      state.execution.prefill_hidden, state.execution.prefill_chunk,
                      state.text_kv_base, state.mtp_kv, &state.text_cache, state.mtp_cache);
+    card.set_rope_scaling(state.execution.rope_scaling);
     configure_text_card(card, state.execution, state.sampling, state.current_state_slot,
                         state.turn_checkpoint_state_slot, state.mtp_proposal_extent);
     card.set_turn_checkpoint_hidden_output(state.turn_checkpoint_hidden);
@@ -89,6 +90,7 @@ prefill_multimodal_chunk(PrefillContext& state, const PreparedPromptData& prompt
                      state.text_kv, state.execution.linear_attention, state.execution.io,
                      state.execution.prefill_hidden, state.execution.prefill_chunk,
                      state.text_kv_base, state.mtp_kv, &state.text_cache, state.mtp_cache);
+    card.set_rope_scaling(state.execution.rope_scaling);
     configure_text_card(card, state.execution, state.sampling, state.current_state_slot,
                         state.turn_checkpoint_state_slot, state.mtp_proposal_extent);
     card.set_turn_checkpoint_hidden_output(state.turn_checkpoint_hidden);

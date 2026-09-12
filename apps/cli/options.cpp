@@ -1,5 +1,6 @@
 #include "options.h"
 #include "product/speculative_options.h"
+#include "runtime/contract/yarn.h"
 
 #include <cerrno>
 #include <cmath>
@@ -81,13 +82,16 @@ std::string usage_text(const char* argv0) {
            " <model.ninfer> (--prompt <text>|--messages <messages.json>)\n"
            "[--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
            "[--device N]\n"
-           "[--kv-dtype bf16|int8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8] [--spec mtp|dflash --draft-tokens N]\n"
+           "[--kv-dtype bf16|int8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8] [--spec mtp|dflash --draft-tokens "
+           "N]\n"
            "       [--lm-head-draft]\n"
            "       [--temperature F] [--top-p F] [--top-k N] [--min-p F]\n"
            "       [--presence-penalty F] [--frequency-penalty F] [--seed N] [--greedy]\n"
            "       [--stop-token-id N]... [--stop <text>]... [--reasoning-stop <text>]...\n"
            "       [--raw-output] [--print-token-ids] [--no-thinking]\n"
-           "       [--reasoning-effort low|medium|xhigh] [--vision] [--vision-max-tokens N]\n"
+           "       [--reasoning-effort low|medium|xhigh] [--rope-yarn-factor F] "
+           "[--rope-original-max-position N] [--vision] [--vision-max-tokens N] "
+           "[--vision-max-attention-pairs N] [--vision-max-media-items N]\n"
            "       [--no-cuda-graph]\n"
            "\n"
            "Streams answer content to stdout and reasoning plus diagnostics to stderr.\n"
@@ -125,6 +129,10 @@ Options parse_options(int argc, char** argv) {
             options.messages_path = value(arg);
         } else if (arg == "--max-new") {
             options.max_new = parse_u32(value(arg), "max-new");
+        } else if (arg == "--rope-yarn-factor") {
+            options.yarn.factor = parse_float(value(arg), arg, 1.0F, 4.0F);
+        } else if (arg == "--rope-original-max-position") {
+            options.yarn.original_context = parse_u32(value(arg), arg);
         } else if (arg == "--max-context") {
             options.max_context = parse_u32(value(arg), "max-context");
         } else if (arg == "--kv-capacity") {
@@ -152,6 +160,13 @@ Options parse_options(int argc, char** argv) {
             options.reasoning_effort = parse_reasoning_effort(value(arg));
         } else if (arg == "--vision") {
             options.enable_vision = true;
+        } else if (arg == "--vision-max-attention-pairs") {
+            options.vision_max_attention_pairs = parse_u64(value(arg), arg);
+            if (options.vision_max_attention_pairs == 0) {
+                throw std::invalid_argument("--vision-max-attention-pairs must be positive");
+            }
+        } else if (arg == "--vision-max-media-items") {
+            options.vision_max_media_items = parse_u32(value(arg), arg);
         } else if (arg == "--vision-max-tokens" || arg == "--vision-limit") {
             options.vision_max_tokens = parse_u32(value(arg), "vision-max-tokens", false);
             options.enable_vision     = true;
@@ -215,6 +230,7 @@ Options parse_options(int argc, char** argv) {
         options.kv_capacity.explicit_tokens < options.max_context) {
         throw std::invalid_argument("--kv-capacity must be at least --max-context");
     }
+    runtime::validate_yarn(options.yarn, options.max_context);
     product::validate_speculative_cli_options(options.speculative);
     if (options.speculative.backend == SpeculativeBackend::DFlash && options.enable_vision) {
         throw std::invalid_argument("--spec dflash cannot be combined with --vision");

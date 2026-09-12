@@ -78,7 +78,8 @@ struct ProcessorOptions {
     int max_video_source_frames            = 100'000;
     double max_video_duration_seconds      = 600.0;
     std::size_t max_media_items            = 16;
-    std::uint64_t max_raw_patches          = 131'072;
+    // At 1536 FP32 features/patch this bounds retained patch data to 1.5 GiB/request.
+    std::uint64_t max_raw_patches          = 262'144;
     // Peak merged-token grid of one media item. Items execute sequentially in one workspace.
     std::uint64_t max_vision_tokens        = 32'768;
     std::uint64_t max_attention_pairs      = 128ULL * 1024ULL * 1024ULL;

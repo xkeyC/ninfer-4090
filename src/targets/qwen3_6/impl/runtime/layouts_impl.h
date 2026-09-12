@@ -532,8 +532,8 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
         const std::uint32_t frontend_limit =
             plan.features.vision_max_tokens > 0 ? plan.features.vision_max_tokens : 8192;
         constexpr std::uint32_t kFrontendSegmentLimit = 768 / 2;
-        const std::uint32_t merged = std::min(plan.capacity, frontend_limit);
-        out.vision_encode          = schedule::VisionContext::workspace_capacity_bytes(
+        const std::uint32_t merged                    = std::min(plan.capacity, frontend_limit);
+        out.vision_encode = schedule::VisionContext::workspace_capacity_bytes(
             merged, std::min(merged, kFrontendSegmentLimit));
     }
 
@@ -613,16 +613,18 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     if (main_page_groups == 0) {
         throw std::invalid_argument("Main KV physical page count must be positive");
     }
-    auto impl                 = std::make_unique<SequencePlanImpl>();
-    impl->weights_profile     = inputs.weights_profile;
-    impl->capacity            = inputs.capacity;
-    impl->main_page_groups    = main_page_groups;
-    impl->kv_capacity         = static_cast<std::uint32_t>(checked_i32(
+    auto impl             = std::make_unique<SequencePlanImpl>();
+    impl->weights_profile = inputs.weights_profile;
+    impl->rope_scaling    = ops::make_text_yarn_scaling(
+        inputs.yarn.factor, inputs.yarn.original_context, TextConfig::rope_theta);
+    impl->capacity         = inputs.capacity;
+    impl->main_page_groups = main_page_groups;
+    impl->kv_capacity      = static_cast<std::uint32_t>(checked_i32(
         static_cast<std::uint64_t>(main_page_groups) * static_cast<std::uint32_t>(kPagedKVPageSize),
         "resolved Paged KV capacity exceeds int32"));
-    impl->max_concurrency     = inputs.max_concurrency;
-    impl->prefill_chunk       = inputs.prefill_chunk;
-    impl->draft_window        = inputs.draft_window;
+    impl->max_concurrency  = inputs.max_concurrency;
+    impl->prefill_chunk    = inputs.prefill_chunk;
+    impl->draft_window     = inputs.draft_window;
     // DFlash keeps checkpoint state in its own cyclic mirror that only covers the resident
     // checkpoint; older ring entries could not rebuild it, so the ring stays off there.
     impl->turn_checkpoint_ring =
@@ -717,16 +719,17 @@ make_sequence_planner_impl(DeviceContext& device, const EngineOptions& options,
     validate_target_options(device, options);
 
     SequencePlanningInputs inputs{
-        .weights_profile     = weights_profile,
-        .capacity            = options.max_context,
-        .max_concurrency     = options.max_concurrency,
-        .prefill_chunk       = std::min(options.prefill_chunk, options.max_context),
-        .draft_window        = options.speculative.draft_tokens,
+        .weights_profile      = weights_profile,
+        .yarn                 = options.yarn,
+        .capacity             = options.max_context,
+        .max_concurrency      = options.max_concurrency,
+        .prefill_chunk        = std::min(options.prefill_chunk, options.max_context),
+        .draft_window         = options.speculative.draft_tokens,
         .turn_checkpoint_ring = options.turn_checkpoint_ring,
-        .speculative_backend = options.speculative.backend,
+        .speculative_backend  = options.speculative.backend,
         .kv_dtype       = options.kv_cache == KvCacheStorage::BFloat16 ? DType::BF16 : DType::I8,
         .kv_quant_group = options.kv_cache == KvCacheStorage::BFloat16 ? 0 : qwen3_6::kKvQuantGroup,
-        .kv_packed_v = options.kv_cache == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 ||
+        .kv_packed_v    = options.kv_cache == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 ||
                        options.kv_cache == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
                        options.kv_cache == KvCacheStorage::RK4V4E8 ||
                        options.kv_cache == KvCacheStorage::RK2V4E8,
@@ -740,8 +743,8 @@ make_sequence_planner_impl(DeviceContext& device, const EngineOptions& options,
                        options.kv_cache == KvCacheStorage::RK2V4E8,
         .kv_packed_k = options.kv_cache == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
                        options.kv_cache == KvCacheStorage::RK4V4E8,
-        .kv_e8_lattice = options.kv_cache == KvCacheStorage::RK4V4E8,
-        .kv_e8_root    = options.kv_cache == KvCacheStorage::RK2V4E8,
+        .kv_e8_lattice  = options.kv_cache == KvCacheStorage::RK4V4E8,
+        .kv_e8_root     = options.kv_cache == KvCacheStorage::RK2V4E8,
         .proposal_head  = options.speculative.proposal_head,
         .features       = qwen3_6::startup_features(options),
         .use_cuda_graph = options.use_cuda_graph,

@@ -107,10 +107,15 @@ intermediate artifacts are excluded unless requested or themselves the deliverab
 NInfer is a from-scratch C++/CUDA inference engine for maximum single-GPU inference performance on
 a small set of explicitly registered checkpoint artifacts. The supported identities are
 `qwen3.6-27b/groupwise-int`, `qwen3.6-27b/nvfp4`, `qwen3.8-27b/groupwise-int`, and
-`qwen3.6-35b-a3b/groupwise-int`. The current implementation is compiled for `sm_120a` and tuned
-and measured on NVIDIA GeForce RTX 5090. All identities execute Text, image/video Vision, MTP,
+`qwen3.6-35b-a3b/groupwise-int`. The current implementation is compiled for `sm_89` and tuned
+and measured on NVIDIA GeForce RTX 4090. All identities execute Text, image/video Vision, MTP,
 prefix reuse, CLI, OpenAI/Anthropic serving, and measurement through the same public `.ninfer`
 Engine route; the 35B-A3B target additionally supports text-only DFlash.
+
+Qwen3.8-27B additionally supports optional static YaRN (factor 1..4, native reference
+262144). Main Text and MTP share immutable per-Program coefficients; Vision tower RoPE
+remains native. Graph captures and saved-session bindings must preserve the selected
+positional transform. The default factor 1 keeps native execution unchanged.
 
 The current workload is one GPU and one resident model instance with a startup-fixed one to eight
 active requests. The Engine forms one compact decode batch at every round boundary and uses bounded

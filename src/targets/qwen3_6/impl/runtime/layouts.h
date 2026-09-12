@@ -7,6 +7,7 @@
 #include "core/gdn_replay_records.h"
 #include "core/layout.h"
 #include "core/tensor.h"
+#include "ninfer/ops/rope.h"
 #include <ninfer/targets/qwen3_6/decoder_state.h>
 #include <ninfer/targets/qwen3_6/round_state.h>
 #include <ninfer/targets/qwen3_6/startup_features.h>
@@ -60,6 +61,7 @@ struct WorkspacePlan {
 
 struct SequencePlanningInputs {
     WeightsProfile weights_profile;
+    YarnOptions yarn;
     std::uint32_t capacity                 = 0;
     std::uint32_t max_concurrency          = 1;
     std::uint32_t prefill_chunk            = 0;
@@ -87,6 +89,7 @@ namespace ninfer::targets::qwen3_6::detail {
 template <>
 struct SequencePlanImpl<NINFER_QWEN36_VARIANT> {
     typename NINFER_QWEN36_VARIANT::WeightsProfile weights_profile;
+    ops::TextRopeScaling rope_scaling;
     std::uint32_t capacity                 = 0;
     std::uint32_t kv_capacity              = 0;
     std::uint32_t main_page_groups         = 0;

@@ -94,18 +94,10 @@ std::string format_finish(ninfer::FinishReason reason) {
 
 std::string format_kv_cache(ninfer::KvCacheStorage storage) {
     if (storage == ninfer::KvCacheStorage::BFloat16) { return "bf16"; }
-    if (storage == ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) {
-        return "rk8v4";
-    }
-    if (storage == ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueGroup64) {
-        return "rk4v4";
-    }
-    if (storage == ninfer::KvCacheStorage::RK4V4E8) {
-        return "rk4v4-e8";
-    }
-    if (storage == ninfer::KvCacheStorage::RK2V4E8) {
-        return "rk2v4-e8";
-    }
+    if (storage == ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) { return "rk8v4"; }
+    if (storage == ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueGroup64) { return "rk4v4"; }
+    if (storage == ninfer::KvCacheStorage::RK4V4E8) { return "rk4v4-e8"; }
+    if (storage == ninfer::KvCacheStorage::RK2V4E8) { return "rk2v4-e8"; }
     return "int8";
 }
 
@@ -283,17 +275,20 @@ int main(int argc, char** argv) {
         ninfer::product::LoadProgressRenderer load_progress(
             std::cerr, ninfer::product::stderr_load_progress_options());
         ninfer::EngineOptions engine_options;
-        engine_options.artifact_path  = cli.artifact_path;
-        engine_options.device         = cli.device;
-        engine_options.max_context    = cli.max_context;
-        engine_options.kv_capacity    = cli.kv_capacity;
-        engine_options.prefill_chunk  = cli.prefill_chunk;
-        engine_options.kv_cache       = cli.kv_cache;
-        engine_options.speculative    = cli.speculative;
-        engine_options.enable_vision      = cli.enable_vision;
-        engine_options.vision_max_tokens  = cli.vision_max_tokens;
-        engine_options.use_cuda_graph     = cli.use_cuda_graph;
-        engine_options.load_progress  = load_progress.callback();
+        engine_options.artifact_path              = cli.artifact_path;
+        engine_options.device                     = cli.device;
+        engine_options.max_context                = cli.max_context;
+        engine_options.kv_capacity                = cli.kv_capacity;
+        engine_options.prefill_chunk              = cli.prefill_chunk;
+        engine_options.kv_cache                   = cli.kv_cache;
+        engine_options.speculative                = cli.speculative;
+        engine_options.yarn                       = cli.yarn;
+        engine_options.enable_vision              = cli.enable_vision;
+        engine_options.vision_max_tokens          = cli.vision_max_tokens;
+        engine_options.vision_max_attention_pairs = cli.vision_max_attention_pairs;
+        engine_options.vision_max_media_items     = cli.vision_max_media_items;
+        engine_options.use_cuda_graph             = cli.use_cuda_graph;
+        engine_options.load_progress              = load_progress.callback();
 
         const auto load_started = Clock::now();
         ninfer::Engine engine(std::move(engine_options));

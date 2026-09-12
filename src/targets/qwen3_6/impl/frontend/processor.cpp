@@ -21,19 +21,18 @@
 namespace ninfer::targets::qwen3_6::frontend_internal {
 namespace {
 
-constexpr int kPatch                    = 16;
-constexpr int kTemporal                 = 2;
-constexpr int kMerge                    = 2;
-constexpr int kFactor                   = kPatch * kMerge;
-constexpr std::uint64_t kPixelsPerVisionToken =
-    static_cast<std::uint64_t>(kFactor) * kFactor;
-constexpr int kPatchFeatures            = 3 * kTemporal * kPatch * kPatch;
-constexpr int kImageToken               = 248056;
-constexpr int kVideoToken               = 248057;
-constexpr std::string_view kImagePad    = "<|image_pad|>";
-constexpr std::string_view kVideoPad    = "<|video_pad|>";
-constexpr std::string_view kVisionStart = "<|vision_start|>";
-constexpr std::string_view kVisionEnd   = "<|vision_end|>";
+constexpr int kPatch                          = 16;
+constexpr int kTemporal                       = 2;
+constexpr int kMerge                          = 2;
+constexpr int kFactor                         = kPatch * kMerge;
+constexpr std::uint64_t kPixelsPerVisionToken = static_cast<std::uint64_t>(kFactor) * kFactor;
+constexpr int kPatchFeatures                  = 3 * kTemporal * kPatch * kPatch;
+constexpr int kImageToken                     = 248056;
+constexpr int kVideoToken                     = 248057;
+constexpr std::string_view kImagePad          = "<|image_pad|>";
+constexpr std::string_view kVideoPad          = "<|video_pad|>";
+constexpr std::string_view kVisionStart       = "<|vision_start|>";
+constexpr std::string_view kVisionEnd         = "<|vision_end|>";
 
 struct Size {
     int h = 0;
@@ -106,15 +105,14 @@ Size smart_resize_video(int frames, int height, int width, std::uint64_t min_pix
     return {h, w};
 }
 
-Size fit_vision_token_budget(Size size, int source_height, int source_width,
-                             std::uint64_t temporal, std::uint64_t token_budget) {
-    if (size.h < kFactor || size.w < kFactor || size.h % kFactor != 0 ||
-        size.w % kFactor != 0 || source_height <= 0 || source_width <= 0 || temporal == 0 ||
-        token_budget < temporal) {
+Size fit_vision_token_budget(Size size, int source_height, int source_width, std::uint64_t temporal,
+                             std::uint64_t token_budget) {
+    if (size.h < kFactor || size.w < kFactor || size.h % kFactor != 0 || size.w % kFactor != 0 ||
+        source_height <= 0 || source_width <= 0 || temporal == 0 || token_budget < temporal) {
         throw std::invalid_argument("invalid adaptive vision resize budget");
     }
-    std::uint64_t h = static_cast<std::uint64_t>(size.h / kFactor);
-    std::uint64_t w = static_cast<std::uint64_t>(size.w / kFactor);
+    std::uint64_t h           = static_cast<std::uint64_t>(size.h / kFactor);
+    std::uint64_t w           = static_cast<std::uint64_t>(size.w / kFactor);
     const double source_ratio = static_cast<double>(source_height) / source_width;
     while (temporal * h * w > token_budget) {
         const double reduce_h_error =
@@ -142,10 +140,9 @@ std::uint64_t attention_token_cap(std::uint64_t attention_pairs) {
     // Vision attention cost is therefore 16 * tokens^2. Videos split the same token count
     // over several temporal grids, so this image bound is conservative for both modalities.
     const std::uint64_t square = attention_pairs / 16ULL;
-    std::uint64_t root = static_cast<std::uint64_t>(std::sqrt(static_cast<double>(square)));
+    std::uint64_t root         = static_cast<std::uint64_t>(std::sqrt(static_cast<double>(square)));
     while (root != 0 && root > square / root) { --root; }
-    while (root != std::numeric_limits<std::uint64_t>::max() &&
-           root + 1 <= square / (root + 1)) {
+    while (root != std::numeric_limits<std::uint64_t>::max() && root + 1 <= square / (root + 1)) {
         ++root;
     }
     return root;
@@ -278,10 +275,10 @@ Prepared prepare_image(const ChatPart& part, const ProcessorOptions& options,
         std::min(options.image_max_pixels,
                  checked_mul(token_budget, kPixelsPerVisionToken, "image token pixels"));
     const std::uint64_t min_pixels = std::min(options.image_min_pixels, max_pixels);
-    Size size = smart_resize_image(image.height, image.width, min_pixels, max_pixels);
-    size = fit_vision_token_budget(size, image.height, image.width, 1, token_budget);
-    const int gh    = size.h / kPatch;
-    const int gw    = size.w / kPatch;
+    Size size    = smart_resize_image(image.height, image.width, min_pixels, max_pixels);
+    size         = fit_vision_token_budget(size, image.height, image.width, 1, token_budget);
+    const int gh = size.h / kPatch;
+    const int gw = size.w / kPatch;
     Prepared out;
     out.item.modality = Modality::Image;
     out.item.grid     = {1, gh, gw};
@@ -306,9 +303,8 @@ Prepared prepare_image(const ChatPart& part, const ProcessorOptions& options,
 Prepared prepare_video(const ChatPart& part, const ProcessorOptions& options,
                        const media::decode::Policy& policy, std::uint64_t token_budget,
                        PreprocessStats& stats) {
-    const std::uint64_t frame_budget =
-        std::min<std::uint64_t>(options.video_max_frames,
-                                checked_mul(token_budget, kTemporal, "video token frames"));
+    const std::uint64_t frame_budget = std::min<std::uint64_t>(
+        options.video_max_frames, checked_mul(token_budget, kTemporal, "video token frames"));
     if (frame_budget < static_cast<std::uint64_t>(options.video_min_frames)) {
         throw ProcessorError(ProcessorErrorKind::BudgetExceeded,
                              "video cannot fit minimum vision token budget");
@@ -320,15 +316,14 @@ Prepared prepare_video(const ChatPart& part, const ProcessorOptions& options,
         std::min(options.video_max_pixels,
                  checked_mul(token_budget, kPixelsPerVisionToken, "video token pixels"));
     const std::uint64_t min_pixels = std::min(options.video_min_pixels, max_pixels);
-    Size size =
-        smart_resize_video(static_cast<int>(video.frames.size()), video.height, video.width,
-                           min_pixels, max_pixels);
+    Size size = smart_resize_video(static_cast<int>(video.frames.size()), video.height, video.width,
+                                   min_pixels, max_pixels);
     const bool pad_temporal = video.frames.size() % kTemporal != 0;
     const int gt            = static_cast<int>((video.frames.size() + kTemporal - 1) / kTemporal);
-    size = fit_vision_token_budget(size, video.height, video.width,
-                                   static_cast<std::uint64_t>(gt), token_budget);
-    const int gh            = size.h / kPatch;
-    const int gw            = size.w / kPatch;
+    size = fit_vision_token_budget(size, video.height, video.width, static_cast<std::uint64_t>(gt),
+                                   token_budget);
+    const int gh = size.h / kPatch;
+    const int gw = size.w / kPatch;
     Prepared out;
     out.item.modality = Modality::Video;
     out.item.grid     = {gt, gh, gw};
@@ -468,7 +463,11 @@ void enforce_budget(const PreprocessStats& stats, const ProcessorOptions& option
     }
     if (stats.attention_pairs > options.max_attention_pairs) {
         throw ProcessorError(ProcessorErrorKind::BudgetExceeded,
-                             "vision attention pairs exceed processor budget");
+                             "vision attention pairs exceed processor budget: requested " +
+                                 std::to_string(stats.attention_pairs) + ", limit " +
+                                 std::to_string(options.max_attention_pairs) +
+                                 "; reduce image/video resolution or retained media history, or "
+                                 "raise --vision-max-attention-pairs");
     }
     if (stats.prompt_tokens > options.max_prompt_tokens) {
         throw ProcessorError(ProcessorErrorKind::BudgetExceeded,

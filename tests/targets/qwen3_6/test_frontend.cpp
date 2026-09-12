@@ -210,8 +210,7 @@ int test_official_tokenizer_merge() {
         return 0;
     }
     const std::filesystem::path root(configured_root);
-    const std::string tokenizer_json =
-        read_file((root / "tokenizer.json").string().c_str());
+    const std::string tokenizer_json = read_file((root / "tokenizer.json").string().c_str());
     const std::string tokenizer_config_json =
         read_file((root / "tokenizer_config.json").string().c_str());
     const std::string generation_config_json =
@@ -265,14 +264,14 @@ int test_official_chat_template() {
                          no_generation) == "<|im_start|>system\nbe concise<|im_end|>\n"
                                            "<|im_start|>user\nhello<|im_end|>\n",
         "leading system prompt differs from the official template");
-    failures += check(
-        render_chat_text({chat_message("system", "first"), chat_message("system", "second"),
-                          chat_message("user", "hello")},
-                         no_generation) == "<|im_start|>system\nfirst\n\nsecond<|im_end|>\n"
-                                           "<|im_start|>user\nhello<|im_end|>\n",
-        "contiguous leading system prompts were not merged in order");
+    failures +=
+        check(render_chat_text({chat_message("system", "first"), chat_message("system", "second"),
+                                chat_message("user", "hello")},
+                               no_generation) == "<|im_start|>system\nfirst\n\nsecond<|im_end|>\n"
+                                                 "<|im_start|>user\nhello<|im_end|>\n",
+              "contiguous leading system prompts were not merged in order");
     failures += check(render_chat_text({chat_message("system", ""), chat_message("user", "hello")},
-                                        no_generation) ==
+                                       no_generation) ==
                           "<|im_start|>system\n<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n",
                       "empty leading system prompt differs from the official template");
 
@@ -626,19 +625,67 @@ int test_automatic_vision_budget_compression() {
 
     auto prepared             = frontend.prepare(std::move(input));
     const auto& prepared_data = FrontendFactory::inspect(prepared);
-    int failures = check(prepared_data.vision_items.size() == 2 &&
-                             prepared_data.prepare.vision_tokens == 2 &&
-                             prepared_data.prepare.raw_patches == 8,
-                         "images were not independently compressed into the Vision workspace");
+    int failures =
+        check(prepared_data.vision_items.size() == 2 && prepared_data.prepare.vision_tokens == 2 &&
+                  prepared_data.prepare.raw_patches == 8,
+              "images were not independently compressed into the Vision workspace");
     failures += check(prepared_data.patches.size() == 8 * 1536,
                       "compressed images produced the wrong patch payload size");
     for (const auto& item : prepared_data.vision_items) {
-        failures += check(item.grid.temporal == 1 && item.grid.height == 2 &&
-                              item.grid.width == 2 && item.patch_count == 4 &&
-                              item.content_digest == kGradientDigest &&
-                              item.token_spans.size() == 1 && item.token_spans.front().count == 1,
-                          "compressed image identity or placeholder geometry is incorrect");
+        failures +=
+            check(item.grid.temporal == 1 && item.grid.height == 2 && item.grid.width == 2 &&
+                      item.patch_count == 4 && item.content_digest == kGradientDigest &&
+                      item.token_spans.size() == 1 && item.token_spans.front().count == 1,
+                  "compressed image identity or placeholder geometry is incorrect");
     }
+    return failures;
+}
+
+int test_aggregate_vision_budgets() {
+    const auto input = [](int count) {
+        ninfer::PromptInput out;
+        ninfer::ChatMessage message;
+        message.role = "user";
+        for (int i = 0; i < count; ++i) {
+            ninfer::MessagePart image;
+            image.kind             = ninfer::MessagePartKind::Media;
+            image.media.kind       = ninfer::MediaKind::Image;
+            image.media.bytes      = gradient_ppm();
+            image.media.media_type = "image/x-portable-pixmap";
+            message.parts.push_back(std::move(image));
+        }
+        out.messages.push_back(std::move(message));
+        return out;
+    };
+    // Each 64x64 fixture has 16 raw patches, hence 256 attention pairs.
+    const Frontend small = FrontendFactory::create_component(resources(), true, 8192, 256, 64);
+    const Frontend large = FrontendFactory::create_component(resources(), true, 8192, 512, 64);
+    auto one             = small.prepare(input(1));
+    int failures         = check(throws_invalid_argument([&] { (void)small.prepare(input(2)); }),
+                                 "aggregate attention budget did not reject two images");
+    failures += check(throws_invalid_argument([&] { (void)small.count_tokens(input(2)); }),
+                      "token counting bypassed the aggregate attention budget");
+    auto two           = large.prepare(input(2));
+    const auto& before = FrontendFactory::inspect(one);
+    const auto& after  = FrontendFactory::inspect(two);
+    failures += check(after.prepare.attention_pairs == 512 && after.vision_items.size() == 2,
+                      "increased attention budget did not admit the same image history");
+    failures +=
+        check(std::equal(before.patches.begin(), before.patches.end(), after.patches.begin()),
+              "increased history budget changed the earlier image's patches");
+    failures += check(large.count_tokens(input(2)) == two.summary().prompt_tokens,
+                      "prepare and token counting disagree under custom vision budgets");
+    const Frontend count_limited =
+        FrontendFactory::create_component(resources(), true, 8192, 65536, 2);
+    failures += check(throws_invalid_argument([&] { (void)count_limited.prepare(input(3)); }),
+                      "media item budget did not reject the third image");
+    const Frontend many = FrontendFactory::create_component(resources(), true, 8192, 65536, 64);
+    failures += check(many.prepare(input(17)).summary().prompt_tokens != 0,
+                      "configured media budget still applied the old 16-item limit");
+    failures += check(throws_invalid_argument([&] {
+                          (void)FrontendFactory::create_component(resources(), true, 8192, 0, 64);
+                      }),
+                      "zero attention budget was accepted");
     return failures;
 }
 
@@ -849,6 +896,7 @@ int main() {
     failures += test_official_resource_guards();
     failures += test_text_and_image_prepare(frontend);
     failures += test_automatic_vision_budget_compression();
+    failures += test_aggregate_vision_budgets();
     failures += test_video_prepare(frontend);
     failures += test_cross_round_stop(frontend);
     failures += test_same_token_stop_priority(frontend);
