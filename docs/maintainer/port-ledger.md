@@ -233,6 +233,35 @@ Deliberately NOT taken: nothing dropped this time. Upstream PR #211 (the stream-
 membership publish we carry as `e565fe50`) was closed unmerged by its author on 09-10 and master
 still publishes unordered - the patch stays fork-only.
 
+## xkeyC fork: sibling merge and context-bounded Vision, 2026-09-28
+
+`xkeyC/ninfer-4090` had forked `rtx4090-port` at `981b685e` and added the chunked host prefix
+cache (`69e6ae19`, `60a5c687`), `usage` cache hits (`14faf879`) and media downsizing
+(`639e926a`). It merged this tree at `aeeba414` (`272d0e9b`). The first three were dropped, not
+re-homed: they lived in the concurrent executor the upstream catch-ups deleted, and the engine's
+Host KV/State replicas and cached-token reporting cover the same ground. The downsizing idea was
+re-applied on the new frontend (`f45859af`): the prompt Vision bound is `max_context` instead of a
+fixed 32768 aggregate, and media over `--vision-max-tokens` is downsized instead of rejected.
+
+Host swap measured on the merged build (official `qwen3_8_27b.ninfer`, `rk4v4-e8`, MTP3,
+`--vision-max-tokens 4096`, 102400 context, C=2, `--device-state-slots 1`,
+`--host-kv-mib 10240`, CUDA 13.1 container on Windows/WSL2). Four agents are activated
+round-robin, one request at a time, 5 steps of ~19K tokens each, so every switch spills the
+previous session and restores the next; the device KV holds one deep session:
+
+| `--host-state-slots` | Continuations reused | Owners evicted | Deepest step TTFT (77K hit + 19K new) |
+|---:|---:|---:|---|
+| 8 (default) | 12/16 | 5 | 14.1 s; the 4 misses re-prefilled 77K-96K in 43.6-57.4 s |
+| 16 | 16/16 | 0 | 13.9-14.2 s |
+
+Transfers ran at 12.8-13.3 GB/s in both directions (pinned DMA); a StateImage moves in ~12 ms;
+spill plus restore plus planning costs a median 0.14 s per activation (0.21 s at 77K depth), the
+rest of TTFT is the new suffix's prefill at ~1670 tok/s. The misses at 8 slots were StateImage
+capacity, not KV bytes (Host KV held 4.9 of 10 GiB): each continuation can hold its endpoint, its
+turn closure and two automatic anchors, and without a StateImage its KV is unusable. Size
+`--host-state-slots` for about four per rotating agent (147 MiB pinned each), or lower
+`--auto-long-anchors`. All four agents recalled a system-prompt code at ~96K depth in both runs.
+
 ## Vision budget per item, 2026-09-23 (`328d9aa8`)
 
 A pi session on production failed every turn with `media_budget_exceeded` "vision raw patches
