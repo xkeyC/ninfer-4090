@@ -9,8 +9,9 @@ namespace ninfer::targets::qwen3_6 {
 class FrontendTestAccess {
 public:
     [[nodiscard]] static Frontend create_component(const FrontendResources& resources,
-                                                   bool vision_enabled            = true,
-                                                   std::uint32_t vision_max_tokens = 8192);
+                                                   bool vision_enabled = true);
+    [[nodiscard]] static Frontend create_component(const FrontendResources& resources,
+                                                   FrontendOptions options);
     [[nodiscard]] static const PreparedPromptData& inspect(const PreparedPrompt& prompt);
 };
 

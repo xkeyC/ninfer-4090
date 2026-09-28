@@ -38,8 +38,8 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_weight,
  *
  * The parent stores rows in physical order query, key, output gate, value while the public output
  * argument order is q, gate, k, v. Every route writes the four independently contiguous final
- * allocations directly; no packed parent output is materialized. The NVFP4 A4 profile may use
- * caller-owned transient storage for its private quantized activation.
+ * allocations directly; no packed parent output is materialized. The NVFP4 A4 and FP8 A8
+ * profiles may use caller-owned transient storage for their private quantized activation.
  *
  * Registered parent forms are:
  *
@@ -49,10 +49,16 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_weight,
  *   BF16 `[5120,T]`, q/gate are BF16 `[6144,T]`, and k/v are BF16 `[1024,T]`.
  * - NVFP4 BlockScaleK16M128x4 `[14336,5120]`, with the same logical row and tensor shapes as
  *   BF16_CTRL.
+ * - FP8_E4M3FN_ROW_BF16S RowScale `[14336,5120]`, with the same logical row and tensor shapes as
+ *   BF16_CTRL.
  *
  * `T` is the positive token extent of the Op contract. BF16_CTRL and W8G32_F16S admit only
  * LinearPolicy::A16Only. NVFP4 admits A16Only and AllowA4; AllowA4 permits the private resolver to
  * select either a qualified A16 route or activation quantization to NVFP4 at every positive T.
+ * FP8 admits A16Only and AllowA8 at every positive T. AllowA8 permits the resolver to choose a
+ * qualified A16 route or private activation quantization followed by A8 Tensor Core computation.
+ * A16Only preserves the represented BF16 activation at every positive T; tile and route cutoffs
+ * are private implementation choices, independent of speculative block width.
  *
  * The oracle evaluates every projection independently with naive FP64 accumulation from the
  * logical values represented by the persistent weight and BF16 activation. The final four BF16
@@ -78,12 +84,13 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_gate_value_weight,
                      Tensor& gate, Tensor& k, Tensor& v, cudaStream_t stream);
 
 /**
- * Qwen3.6 companion W8 specialization. The W8G32_F16S RowSplit parent has shape [6144,2048]
- * and stored row order [query 4096, key 1024, value 1024]. `x` is contiguous BF16 [2048,T],
- * q is contiguous BF16 [4096,T], and k/v are contiguous BF16 [1024,T]. Every route writes
- * the three independent final allocations directly; no parent output or transient workspace
- * is materialized. T may be any positive value. Q and K remain raw projection outputs: this
- * Op does not normalize or rotate either tensor.
+ * Three-output W8 specialization. The W8G32_F16S RowSplit parent stores rows in order
+ * [query 4096, key 1024, value 1024]. Registered parent forms are [6144,2048] with BF16
+ * x [2048,T] for the Qwen3.6 companion and [6144,5120] with BF16 x [5120,T] for DFlash2.
+ * q is contiguous BF16 [4096,T], and k/v are contiguous BF16 [1024,T]. Every route writes the
+ * three independent final allocations directly; no parent output or transient workspace is
+ * materialized. T may be any positive value. Q and K remain raw projection outputs: this Op does
+ * not normalize or rotate either tensor.
  */
 void attn_input_proj(const Tensor& x, const Weight& query_key_value_weight, Tensor& q, Tensor& k,
                      Tensor& v, cudaStream_t stream);

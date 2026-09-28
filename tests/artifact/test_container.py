@@ -36,6 +36,12 @@ def _small_specs():
             "NVFP4",
             "blockscale-k16-m128x4-v1",
         ),
+        TensorSpec(
+            "quant/fp8_row",
+            (2, 4),
+            "FP8_E4M3FN_ROW_BF16S",
+            "row-scale-v1",
+        ),
     ]
 
 
@@ -67,7 +73,7 @@ def test_v2_round_trip_covers_every_registered_storage(tmp_path):
         summary = artifact_summary(artifact)
         assert summary["model_id"] == "test-model"
         assert summary["weights_id"] == "test-weights"
-        assert summary["objects"] == 9
+        assert summary["objects"] == 10
         assert summary["formats"] == {
             "BF16": 1,
             "FP32": 1,
@@ -77,6 +83,7 @@ def test_v2_round_trip_covers_every_registered_storage(tmp_path):
             "Q6G64_F16S": 1,
             "W8G32_F16S": 1,
             "NVFP4": 1,
+            "FP8_E4M3FN_ROW_BF16S": 1,
         }
 
 
@@ -159,15 +166,12 @@ def test_reader_rejects_invalid_framing_schema_and_geometry(tmp_path):
         Artifact.open(path)
 
 
-def test_reader_rejects_v1_with_the_migration_command(tmp_path):
-    path = tmp_path / "legacy.ninfer"
+def test_reader_rejects_unknown_magic(tmp_path):
+    path = tmp_path / "unknown.ninfer"
     _write_raw(
         path,
         {"model_id": "test-model", "objects": [{"unused": True}]},
-        magic=b"NINFER\x00\x01",
+        magic=b"INVALID!",
     )
-    with pytest.raises(
-        ArtifactError,
-        match=r"python3 -m tools\.artifact\.migrate_v1_to_v2 <artifact>",
-    ):
+    with pytest.raises(ArtifactError, match="artifact magic is not NInfer v2"):
         Artifact.open(path)

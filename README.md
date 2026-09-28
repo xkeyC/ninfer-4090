@@ -11,81 +11,6 @@ This fork targets `sm_89` and Linux. Blackwell-only NVFP4/W4A4 execution is unav
 engine uses the same groupwise-int path as the 3090 base. The Windows path and the
 Qwen3.6-35B-A3B target are inherited but untested on the RTX 4090.
 
-## Long-context multi-session cache
-
-This fork adds a process-local host block cache for long agent conversations that outlive GPU KV
-residency. `--host-prefix-cache-mib N` partitions a retained snapshot into metadata, cumulative GDN
-state/checkpoints, and 64-token KV page groups. Byte-identical immutable blocks are stored once
-across conversation branches, while logical manifests remain available even when one copy is
-restored into a GPU lane. Restore streams block spans directly to pinned staging instead of first
-copying the full snapshot; a later spill transfers and hashes only new or changed device blocks.
-
-Each block records its recall count and last-recall time. When the byte budget is full, eviction
-chooses the coldest unpinned block using recency plus a logarithmic frequency bonus and removes all
-dependent manifests atomically. This avoids the old all-or-nothing behavior where a single large
-session could exceed the host budget or destroy every reusable prefix on eviction.
-
-KV-affinity admission complements the block store. With `--kv-affinity-burst 5` (the default), a
-queued request matching the current GPU KV owner may pass cold work for at most five contended
-admissions; the scheduler then rotates to the oldest competing conversation. The bound advances
-only under real contention, and `--kv-affinity-grace-ms 1500` gives the current conversation a
-short window to submit its next turn before paying a multi-GiB owner switch.
-
-An RTX 4090 capacity test with three 90K-token branches produced three logical manifests backed by
-2,909 unique blocks using 2.67 GB of host RAM. A resident continuation completed in 1.68 seconds;
-an evicted 90K branch restored and answered in 10.27 seconds, with no capture or restore failures.
-
-### Four-Agent gradual 200K rotation
-
-The long-run cache test on 2026-08-23 used Qwen3.8-27B-Uncensored with `rk4v4-e8`, MTP3, a
-253,952-token shared KV pool, two lanes, a 20 GiB host cache, affinity burst 5, and 1500 ms grace.
-Four independent Agent histories ran sequential round-robin. Each started at 1,389 tokens, returned
-the complete assistant content, reasoning, and tool calls, then added about 1,065–1,097 tokens of
-tool/workspace state per turn. An Agent left the rotation only after its measured prompt reached
-200K. The run completed 627 requests over 166 rounds in 63.70 minutes. A separate server restart
-then measured a true empty-cache 200,037-token request as the cold baseline.
-
-| 200K request | Prompt | Cached | Hit rate | Queue | Host restore | TTFT | TTFT vs cold |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Empty-cache baseline | 200,037 | 0 | 0.00% | 0.000 s | 0 s | 149.951 s | 1.00× |
-| Agent 0, resident | 200,900 | 199,803 | 99.45% | 0.002 s | 0 s | 1.800 s | 83.33× |
-| Agent 1, restored | 201,127 | 194,074 | 96.49% | 1.064 s | 0.410 s | 10.627 s | 14.11× |
-| Agent 2, restored | 200,128 | 196,479 | 98.18% | 1.043 s | 0.434 s | 6.890 s | 21.76× |
-| Agent 3, restored | 200,766 | 199,669 | 99.45% | 1.047 s | 0.458 s | 4.363 s | 34.37× |
-
-The median final TTFT was 4.363 seconds, 34.37× faster than the measured cold request. The full
-continuation population separates scheduling delay from data movement as follows; restore
-percentiles include only the 534 requests that actually transferred a Host entry, while resident
-requests report zero restore time.
-
-| Long-run metric | Result |
-|---|---:|
-| Continuations / weighted cache hit | 623 / 98.028% |
-| Recompute ≤1.5K | 500 / 623 (80.26%) |
-| Recompute 1.5K–10K | 118 / 623 (18.94%) |
-| Recompute 10K–50K | 4 / 623 (0.64%) |
-| Recompute >50K | 1 / 623 (0.16%) |
-| Continuations with zero cached tokens | 0 |
-| TTFT P50 / P95 | 3.884 s / 8.985 s |
-| Queue P50 / P95 | 1.332 s / 1.483 s |
-| Host restore P50 / P95 | 0.308 s / 0.479 s |
-| Host restore payload / effective bandwidth | 1.188 TB / 7.592 GB/s |
-| Captures / cumulative capture wall | 542 / 513.504 s |
-| Block/manifest evictions | 516 |
-| Cache drops / capture failures / restore failures | 0 / 0 / 0 |
-
-The old approximately 122K per-lane wall was crossed without a reset: 128,644- and 130,095-token
-requests reused 127,579 and 129,030 tokens. Once the 20 GiB budget filled, ordinary pressure caused
-temporary rollback by a few 1K turns and then rebuilt the deep frontier. One request at 137,352
-tokens retained only 8,439 tokens and took 89.881 seconds; this was the sole >50K rollback and the
-same Agent returned to a recent deep frontier on following turns. Queue P50 was over four times
-restore P50 in this deliberately strict alternation, and cumulative capture wall was the larger
-remaining cache data-path cost.
-
-See [Serving](docs/serving.md) for flags and metrics and
-[Concurrent inference architecture](docs/maintainer/concurrent-inference-architecture.md) for the
-ownership and fairness contracts.
-
 ## Measured results on the RTX 4090
 
 Conditions: single request, greedy decoding, CUDA Graphs on, INT8 KV, `--prefill-chunk 1024`,
@@ -196,17 +121,18 @@ decode batched at roughly 1.5x aggregate throughput, each lane keeping its own
 resident prefix. Prefill still serializes across lanes, so a deep cold prefill
 delays the other lane's first token.
 
-Add `--turn-checkpoints 32` when clients edit conversation history (agent memory
-updates, message rewrites, regenerated turns): the server then re-prefills from
-the nearest retained turn boundary instead of from zero. The ring costs host
-memory only, about 4.6 GiB per slot at 32 entries. See
-[docs/turn-checkpoint-ring.md](docs/turn-checkpoint-ring.md).
-
-Add `--host-prefix-cache-mib 20480` to preserve involuntarily evicted sessions in a process-local,
-byte-bounded host block cache. Immutable metadata, GDN checkpoints, and 64-token KV page groups are
-deduplicated across session branches; block recall time and frequency choose victims under memory
-pressure. A later compatible prompt restores the cached continuation automatically and prefills
-only its new suffix, without `/slots` client calls. DFlash is not supported.
+When clients edit recent conversation history (a re-serialized reply, tool results
+folded into the previous turn, an updated agent memory block), the server proposes a
+private long anchor at each of the last N message boundaries of every prompt
+(`--auto-long-anchors N`, on by default at the `--max-long-anchors-per-continuation`
+cap of 2) and re-prefills from the anchor below the edit instead of from zero.
+Coverage reaches back exactly as many message boundaries as the retention cap:
+when the anchor set is full the shallowest is evicted, so an edit deeper than the
+cap still re-prefills from zero. Raise `--max-long-anchors-per-continuation` and
+`--auto-long-anchors` together for deeper reach; each retained anchor holds one GDN
+state image (about 147 MiB of host memory on Qwen3.8-27B), so size `--host-state-slots`
+for `continuations x (2 + anchors)`. The old `--turn-checkpoints` ring is retired
+and ignored; see [docs/turn-checkpoint-ring.md](docs/turn-checkpoint-ring.md).
 
 Extra requests beyond the slots wait in the admission queue, and the queue deadline
 defaults to 30 seconds. A deep prefill can hold a slot longer than that, so
@@ -280,19 +206,17 @@ docker run --rm --gpus all --publish 8080:8080 \
   --vision --preserve-thinking
 ```
 
-The scratchpad bounds one image/video item at a time; Vision items are encoded sequentially and
-reuse the same workspace. Before patch construction, the processor automatically downsizes every
-item whose aligned grid would exceed the limit. The cap is independent per item, so appending a new
-image never changes an earlier image's grid or invalidates an otherwise reusable cached prefix.
-Impossible items (for example, a video's mandatory temporal grids alone exceeding the limit) still
-fail as `media_budget_exceeded` before reaching the encoder. Each additional 1024 tokens of
-scratchpad costs about 62 MiB of VRAM. Independent aggregate safeguards for media count, retained
-raw patches, Vision attention work, and total prompt length still apply to extreme histories.
-
-Expanded media tokens remain ordinary prompt tokens and therefore continue to occupy context KV
-until the client removes or summarizes that history. The encoded bytes and float patch payload are
-transient: after Vision prefill only the token/KV state plus compact media identity metadata remain,
-and a compatible cached prefix skips Vision execution for historical images.
+The vision tower encodes one image at a time, so the scratchpad bounds the size
+of each image, not the number of images or the conversation depth. One
+1024x1024 image costs 1026 vision tokens, and the default admits a single image
+of up to about 2880x2880 pixels. All images in one request share the upstream
+aggregate budget of `min(--max-context, 32768)` vision tokens. Agent clients
+send every earlier image again with each turn, so that aggregate is what a long
+conversation with screenshots uses up. The server rejects an image over the
+scratchpad, or a request over the aggregate, with `media_budget_exceeded`
+before the request reaches the encoder. For large single images or dense video,
+raise the limit with `--vision-max-tokens`. Each additional 1024 tokens of
+scratchpad costs about 62 MiB of VRAM.
 
 ### The tradeoff
 
@@ -354,62 +278,78 @@ GCC 13, and CMake 3.28 or newer; the Docker image builds with CUDA 13.1.
 - **`/v1/models` reports `context_window`.** Clients without access to a llama.cpp `/props` or a
   vLLM `max_model_len` can size prompts from the models payload.
 - **llama.cpp-compatible `timings` on chat completions.** Responses and final stream chunks carry
-  a top-level `timings` block (`prompt_n`/`predicted_n`, per-second rates, `ttft_ms`, `queue_ms`,
-  `cache_restore_ms`, `cache_n`, `draft_n`/`draft_n_accepted`), so proxies such as llama-swap show
-  per-request prefill and decode rates, MTP draft acceptance, and prefix-cache hits. Contributed by the
+  a top-level `timings` block (`prompt_n`/`predicted_n`, per-second rates, `ttft_ms`, `cache_n`,
+  `draft_n`/`draft_n_accepted`), so proxies such as llama-swap show per-request prefill and decode
+  rates, MTP draft acceptance, and prefix-cache hits. Contributed by the
   [shantanusingh16 fork](https://github.com/shantanusingh16/ninfer-4090) of this repository.
 - **`GET /metrics`.** Prometheus counters under llama.cpp-compatible names
   (`llamacpp:prompt_tokens_total`, `llamacpp:prompt_seconds_total`,
   `llamacpp:tokens_predicted_total`, `llamacpp:tokens_predicted_seconds_total`,
   `llamacpp:requests_processing`, `llamacpp:requests_deferred`), so existing scrapers read this
-  server without changes. Prompt tokens count only computed prefill; prefix-cache hits are
-  excluded, as in llama.cpp. Additional `ninfer:` series report request totals, prefix-cache
-  hits, MTP draft/acceptance totals, and host-prefix-cache captures/hits/drops/evictions,
-  capture/restore failures, transferred bytes and seconds, plus its live entry and byte gauges.
+  server without changes. Processing/deferred occupancy is reserved before prompt preparation
+  or engine submission and held through response release, so accepted work cannot disappear from
+  metrics while queued. Prompt tokens count only computed prefill; prefix-cache hits are excluded,
+  as in llama.cpp. Additional `ninfer:` series report request totals, prefix-cache hits, and MTP
+  draft/acceptance totals.
 - **`GET /slots`.** A llama.cpp-shaped slot table read from the engine's real lane state: busy
   slots report their request's prompt and reused-prefix sizes, idle retained slots report the
   resident session's depth and its identifying `session_digest`. Truthful per-slot attribution
   holds at any `--max-concurrency`.
 - **Slot session save/restore.** `--slot-save-path DIR` (off by default) enables llama.cpp-style
   `POST /slots/{id}?action=save|restore|erase`: one idle slot's complete resident session -
-  paged Text and MTP KV, GDN linear-attention state, turn checkpoint, and prefix identity -
-  moves to or from disk, and a restored slot reuses the cache across server restarts instead of
-  re-prefilling (a 6.9k-token session restores in about 0.1 s against a multi-second reprefill).
+  paged Text and MTP KV, GDN linear-attention state, rewrite checkpoint, long anchors, and
+  prefix identity - moves to or from disk, and a restored slot reuses the cache across server
+  restarts instead of re-prefilling (a 6.9k-token session restores in about 0.1 s against a
+  multi-second reprefill).
   Sessions are identified by a stable `session_digest`; chat completions carry `id_slot` and the
   digest next to `timings`, and `save`/`erase` accept an `if_digest` precondition checked
-  atomically, so a client always persists exactly the session it means. Restore extends the
-  saved frontier (or its turn checkpoint); the GDN state cannot rewind further, and the DFlash
-  backend is not supported. Details in [docs/serving.md](docs/serving.md).
+  atomically, so a client always persists exactly the session it means. A restored session is
+  reusable from its endpoint, its rewrite checkpoint, or any retained long anchor; the GDN
+  state cannot rewind below the deepest retained checkpoint, and the DFlash backend is not
+  supported. Details in [docs/serving.md](docs/serving.md).
 - **Reuse-aware lane choice.** When prefix reuse ties (typically zero for a fresh session),
   admission picks the lane whose occupation costs least to replace - an empty lane before any
   retained session, then the shallowest - so a burst request no longer evicts a deep resident
   session while a free lane exists.
-- **Turn checkpoint ring.** `--turn-checkpoints N` (off by default) keeps up to N past turn
-  checkpoints per slot in host memory. A prompt that rewrites the middle of its history -
-  an edited message, an updated agent memory block, a regenerated earlier turn - restores at
-  the deepest checkpoint below the edit instead of re-prefilling from zero; generation after
-  the restore is greedy-identical to a cold prefill. One checkpoint holds the GDN
-  linear-attention state (about 147 MiB of host memory on Qwen3.8-27B); the attention KV
-  needs no copy. Slot snapshots carry the ring across restarts (format version 2, written
-  only when the ring is non-empty, so existing files stay readable everywhere). The
-  recommended value is 32. Details in
-  [docs/turn-checkpoint-ring.md](docs/turn-checkpoint-ring.md).
+- **Automatic long anchors.** `--auto-long-anchors N` (default: the
+  `--max-long-anchors-per-continuation` cap) has the server propose a private long anchor at
+  each of the last N message boundaries of every prompt. Upstream's long anchors exist only
+  where a client places an explicit `PrivateLongAnchor` marker, which no OpenAI or Anthropic
+  request can express, so without this flag a rewrite deeper than the last assistant reply
+  has no reuse candidate at all and re-prefills from token zero. With it, the prompt restores
+  at the anchor below the edit. A full anchor set replaces its shallowest entry, so the
+  retained anchors track the most recent boundaries and coverage reaches back exactly the
+  cap: an edit deeper than `--max-long-anchors-per-continuation` boundaries still re-prefills
+  from zero, so raise the cap and this flag together (and `--host-state-slots` with them) for
+  deeper history. Measured on agent traffic, 94% of consecutive prompts are pure appends and
+  96.5% of the remaining history rewrites are two messages deep or less, so the default cap of
+  2 covers 99.8% of turns. The rare deeper edits replace the whole history from message one or
+  two, where no anchor can help. Anchors ride the existing catalog, pressure planner and slot
+  snapshots. This replaces the retired `--turn-checkpoints` ring
+  ([docs/turn-checkpoint-ring.md](docs/turn-checkpoint-ring.md)).
 - **Auto-save on eviction.** `--auto-save-evicted` (off by default, requires
-  `--slot-save-path`) spills an involuntarily evicted session - checkpoint ring included -
-  back to the slot file it was last saved to or restored from, before the eviction destroys
-  it. Rotating more sessions than slots then loses nothing: the next restore recovers the
-  session at its latest frontier. Explicit `erase` never auto-saves.
-- **Automatic host prefix block cache.** `--host-prefix-cache-mib N` (off by default) captures an
-  involuntarily evicted session whether or not the client used `/slots`. Logical session manifests
-  share identical immutable blocks, remain matchable while restored into a lane, and return only
-  changed/new blocks on the next capture. Admission restores the deepest compatible frontier and
-  follows the ordinary suffix-prefill path. Under pressure, cold blocks are selected by recall
-  time plus a logarithmic recall-count bonus; dependent unpinned manifests are removed atomically.
-  DFlash is not supported.
-- **KV-affinity admission.** With the host cache enabled, `--kv-affinity-burst 5` lets work matching
-  a resident KV owner pass older cold work at most five contended admissions before rotating to
-  the oldest competing session. `--kv-affinity-grace-ms 1500` briefly waits for the just-finished
-  conversation's next turn. Both are configurable; a burst of `0` disables affinity scheduling.
+  `--slot-save-path`) spills an involuntarily evicted session - endpoint, rewrite checkpoint
+  and long anchors included - back to the slot file it was last saved to or restored from,
+  before the eviction destroys it. Rotating more sessions than slots then loses nothing: the
+  next restore recovers the session at its latest frontier. Explicit `erase` never auto-saves.
+  Two rules keep a spill from losing data. First, a slot file is bound to at most one slot at
+  a time: the most recent `save` or `restore` of a path owns it, and every other slot that held
+  the same path is unbound. A stale copy of a session, left behind when a restore retains its
+  source, therefore cannot write the file when it is evicted. Second, a spill never rolls a
+  file back: a spill with fewer tokens than the file already holds is refused and logged as
+  `slot auto-save SKIPPED`, while an explicit `save` always wins. Without these rules a
+  two-day-old copy of a live session once overwrote its 78k-token file, and the client resumed
+  the rolled-back state.
+- **Planner diagnostics in the request JSONL.** `--request-log-jsonl FILE` records, per
+  request, the reuse path the planner chose (`prefix_reuse_path`), the prefix tokens it reused,
+  and the materialization search behind the choice: `stop_reason`, `budget_exhausted`,
+  `selected_maximal_fallback`, `targets_evaluated`, and `best_reuse_prompt_tokens`, the most
+  reuse any candidate offered. That last field separates the two causes of a cold prefill. A
+  value of `0` means that no reuse candidate existed, so the cause sits upstream of the planner:
+  a missing anchor or a changed prefix. A large value beside `prefix_reuse_path=root` means
+  that a candidate existed and the planner rejected it, which points at the search itself.
+  `/metrics` carries only the llama.cpp-compatible subset, so this file is the only place these
+  fields appear. Field reference in [docs/serving.md](docs/serving.md).
 - **NVFP4-A4 test gating.** The A4 activation tests skip on hardware without FP4 tensor cores
   instead of aborting. The full remaining suite passes on the RTX 4090.
 - **E8 lattice KV quantization (ported).** The `rk8v4`/`rk4v4`/`rk4v4-e8`/`rk2v4-e8` KV modes
@@ -421,9 +361,9 @@ GCC 13, and CMake 3.28 or newer; the Docker image builds with CUDA 13.1.
   Method and measurements in [docs/udp-fork-comparison.md](docs/udp-fork-comparison.md).
 - **Configurable vision scratchpad (ported).** `--vision-max-tokens` comes from the same fork
   and sizes the vision encode workspace (default 8192 tokens, formerly hardcoded 32768). This
-  fork keeps the processor in lockstep and automatically fits each image/video grid into the
-  reusable per-item workspace. Physical per-item minima and the separate aggregate processor
-  safeguards still report `media_budget_exceeded` when exceeded.
+  fork additionally wires the processor's single-item budget to the same limit, so an
+  over-limit image fails as `media_budget_exceeded` instead of reaching an undersized encoder.
+  The aggregate budget over all images in a request stays at upstream's 32768 tokens.
 
 ## Known limits on the RTX 4090
 
@@ -448,21 +388,37 @@ GCC 13, and CMake 3.28 or newer; the Docker image builds with CUDA 13.1.
 
 ## Artifact
 
-| Model | Artifact | Size |
-|---|---|---:|
-| Qwen3.8-27B | [official NInfer groupwise artifact](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) | 16.96 GiB |
+| Model | Artifact | Revision | Size | SHA-256 |
+|---|---|---|---:|---|
+| Qwen3.8-27B | [official NInfer groupwise artifact](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) | `3526913004b1` (2026-08-14, container v2) | 16.96 GiB | `eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e` |
+| Qwen3.8-27B + DFlash2 weights | same repository | `dc370fb6295a` (2026-09-06, container v2) | 19.03 GiB | `0634abb07024221de141456cf04a42ab74b18bc38e1b781c6eb2e062a467eec3` |
 
-The artifact is architecture-independent; the model card's RTX 5090 requirement describes the
-upstream engine, not the file. Verify the download against the SHA-256 published on the card.
+The download scripts fetch the pinned `3526913004b1` revision, which is the artifact this fork is
+validated with. The artifact is architecture-independent; the model card's RTX 5090 requirement
+describes the upstream engine, not the file. The `dc370fb6295a` revision adds the DFlash2 draft
+weights and loads on the same engine (`--spec dflash2 --draft-tokens 3` to use them).
+
+**Do not download the `main` revision.** Since 2026-09-15 it is a container-v3 artifact with a
+maintained jinja chat template. This fork reads container v2 only and rejects v3 with
+`artifact magic is not NInfer v2`; v3 support arrives with the next upstream catch-up.
 
 ## Reasoning effort
 
 Qwen3.8-27B has three trained reasoning depths plus an off switch. OpenAI Chat Completions
 accepts a top-level `reasoning_effort` field (`low`, `medium`, `xhigh`) and a top-level
 `enable_thinking` boolean; hidden reasoning returns separately as `message.reasoning_content`.
-The `chat_template_kwargs` request field of llama.cpp is not supported and is rejected. For the
-CLI, pass `--reasoning-effort` or `--no-thinking`. Sampling defaults come from the model card and
-switch with the thinking mode.
+Only those three levels are accepted, plus `none` to turn thinking off. `high`, `minimal`, and
+`max` are rejected as `reasoning_effort_not_supported`, so a client that offers a `high` setting
+must map it to `xhigh`. A token budget for reasoning is separate from the effort level. It is
+set only through the Anthropic Messages path (`thinking.budget_tokens`) or server-wide with
+`--default-thinking-budget N`; the OpenAI paths have no field for it. Without a budget,
+reasoning is bounded only by the request's `max_tokens`, which is what the model card
+recommends, and the `model_thinking_tokens` field of the request JSONL reads zero, because that
+counter runs only under a budget. The `chat_template_kwargs` request field of llama.cpp is not
+supported and is rejected. For the CLI, pass `--reasoning-effort` or `--no-thinking`. Sampling
+defaults come from the model card and switch with the thinking mode: `temperature=1.0`,
+`top_p=0.95`, `top_k=20` in thinking mode; `temperature=0.7`, `top_p=0.80`, `top_k=20`,
+`presence_penalty=1.5` in non-thinking mode.
 
 ## Serving APIs
 
@@ -486,6 +442,16 @@ JSONL request logs. See [HTTP serving](docs/serving.md) and [CLI usage](docs/cli
 - [jram4/ninfer-4090](https://github.com/jram4/ninfer-4090) - an earlier RTX 4090 port of a July
   2026 snapshot. Its Ada dispatch tuning targets a kernel organization that upstream has since
   replaced, so this fork starts from the current 3090 base instead.
+
+## Support
+
+NInfer is a personal project that I develop out of interest. If you find it useful and would like
+to support its continued development, you can [support the project on Ko-fi](https://ko-fi.com/neroued).
+
+Support is entirely voluntary. It is not a purchase or investment and does not come with financial
+returns, promised services or features, or a role in project decisions. The project's direction,
+priorities, technical choices, and release schedule remain independently determined by the
+maintainer.
 
 ## License
 

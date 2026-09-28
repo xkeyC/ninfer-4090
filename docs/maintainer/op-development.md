@@ -111,8 +111,8 @@ schedule composition in the target. There is no target-private Op category.
 
 When a contract defines an axis as the Text/MTP token extent `T`, it admits every positive value
 representable by its views and available storage unless the contract declares a semantic capacity.
-Decode, small-T, and prefill may name private implementation or benchmark regimes; they are not
-semantic variants or separate target-callable entries.
+Decode, latency-sensitive/hot-interval, and prefill may name private workload or benchmark
+regimes. They are not semantic variants, separate target-callable entries, or compute mechanisms.
 
 Other axes retain the finite geometry or capacity declared by their own contracts. A matrix column
 does not become Text/MTP `T` merely because an implementation uses the same physical layout.
@@ -361,7 +361,12 @@ common reporting behavior belong in [`tests/README.md`](../../tests/README.md).
 
 ### 6.1 Oracle
 
-Every floating-point Op uses one independent naive FP32/FP64 mathematical oracle over the logical
+Choose the reference and comparison from the observable promise of the Op. A tensor's floating-point
+dtype alone does not determine its acceptance test. Identify the outputs, state effects, explicit
+representation boundaries, and the realistic failure that the check must detect before selecting
+an oracle.
+
+For an Op whose promise is a mathematical computation, use one independent naive FP32/FP64 oracle over the logical
 values represented by its public inputs. Test-owned fixture code independently decodes packed
 values before invoking the oracle. The oracle evaluates the complete formula at high precision and
 retains that result. It does not reproduce a production route's staging casts, activation
@@ -370,8 +375,17 @@ output.
 
 Exact transforms and codecs use an independent exact oracle. A fused oracle evaluates the complete
 fused formula instead of composing production Ops. A stateful oracle computes both output and new
-state. Another GPU route, target reference, generated model output, or pairwise implementation
-parity is supplementary evidence, never a second oracle.
+state. For such mathematical contracts, another GPU route, generated model output, or pairwise
+implementation parity is supplementary evidence, not the mathematical oracle.
+
+When the contract instead requires exact equivalence to a specified execution, that execution is
+the reference. ReplaySSM record/fold must preserve the corresponding snapshot outputs and committed
+state bit for bit. Compare the same initial state, physical block, inputs, and arithmetic policy;
+for each committed prefix, select the corresponding snapshot from that same block. Re-running a
+shorter projection can choose different arithmetic and is not an equivalent reference. Check raw
+record copies, untouched state, invalid tails, and zero-commit effects according to their contracts.
+A separate FP64 recurrence does not establish this equivalence and is not required for its acceptance.
+If the snapshot computation itself changes, validate its mathematical contract separately.
 
 The oracle determines correctness but does not prescribe production arithmetic. Private precision,
 instruction operands, reduction association, staging, workspace representation, and kernel
@@ -441,6 +455,91 @@ production dispatch; verify final correctness and performance through the public
 the losing candidates, temporary controls, and comparison-only entry points. The selected
 production implementation is not temporary merely because it originated in the sweep.
 
+Construct that sweep as one candidate-by-extent matrix whenever the candidate domain is known at
+compile time. Compile the complete decision set together and collect every relevant extent in one
+run; do not emulate a sweep by repeatedly editing one template instance, rebuilding, and timing a
+few points. A second measurement pass is warranted only when the first result is invalid or
+inconclusive, or when it identifies a materially new kernel family whose result can change the
+decision. Changing one knob at a time after the decision domain is already known is not additional
+evidence.
+
+### 7.1 Route-development transaction
+
+Develop a new optimized route as one vertical transaction around a representative registered
+problem. First establish the public admission, validation, workspace query, independent oracle
+case, and public benchmark point needed to exercise that problem.
+
+Keep execution mechanisms and workload regions as independent dimensions. SIMT, Tensor Core MMA,
+and other instruction or decomposition choices describe how a kernel computes. A single-token
+point, a latency-sensitive interval, and a throughput anchor describe where an implementation is
+measured. Do not treat a range label such as "small-T" as a compute mechanism, assume that MMA is
+restricted to large extents, or require one kernel family per workload region.
+
+Choose the order of mechanism exploration from the live performance question rather than a fixed
+smallest-to-largest sequence. In particular, it can be useful to establish an accelerator route at
+the primary throughput anchor before exhaustively tuning the latency-sensitive interval. Its
+measured lower-extent behavior then bounds where further non-accelerator optimization is useful.
+This ordering does not determine the eventual crossover: the latency-sensitive sweep later
+compares every relevant mechanism, and an MMA route may or may not enter that interval.
+
+When a low-precision MMA mechanism requires a private activation representation, activation
+quantization belongs to that mechanism rather than to the workload region where it happens to win.
+On-chip quantization inside the contraction and a separately launched materialization consumed by
+the contraction are distinct execution decompositions. Hold the quantization formula, scale
+granularity, and scale representation constant when attributing a result to that decomposition. If
+one decomposition requires a different arithmetic profile, qualify it separately against the
+oracle and report the comparison as a profile-plus-decomposition decision. Treat multiple
+decompositions as candidates only while the choice remains a live performance question. A
+qualified complete public route that reaches the relevant hardware roofline within measurement
+uncertainty can close that question without implementing another decomposition; never require an
+alternative whose only possible benefit would be to exceed the roofline. Otherwise compare the
+complete launch/workspace traffic of the plausible alternatives, and do not select a route from
+contraction-only timing.
+
+Each kernel family may expose compile-time schedule parameters that distinguish concrete,
+plausible candidates. Instantiate only the small overlapping candidate set needed to answer a live
+decision; do not create a Cartesian product of speculative knobs. Add another family or parameter
+only when evidence shows that the existing candidates cannot cover a relevant part of the
+workload. Once dispatch is selected, retain the winning instances and parameters and remove losing
+candidates and unused knobs.
+
+Derive the latency-sensitive **hot interval** from the active product workload rather than fixing a
+repository-wide extent. Within that interval, a temporary private-launcher sweep may compare every
+relevant extent. Use it to establish the pointwise performance envelope, candidate crossovers, and
+adjacent-extent latency changes. Production dispatch should stay close to that envelope while
+keeping latency progression and route boundaries stable; a boundary needs repeatable benefit
+larger than measurement uncertainty and must not introduce an avoidable latency cliff. Do not add
+a universal percentage threshold: the task records the timing conditions and the scale needed to
+distinguish its candidates.
+
+When the deliverable covers a latency-sensitive interval, review and report its pointwise curve,
+not only its minimum, maximum, average, or selected route.
+At minimum, identify the largest adjacent-extent increase and every route or schedule seam in the
+measured interval. An unexplained material jump blocks a claim that the interval is smooth: either
+change the kernel or dispatch, or record why the complete candidate matrix shows that the jump is
+currently unavoidable. Never omit, interpolate over, or replace an observed point with an
+invented value.
+
+Beyond the hot interval, select the small number of large-extent anchors that represent the actual
+bulk workload. Optimize the primary anchor for throughput and for the roofline of the execution
+resource used by the selected route. Use sparse supporting points and as few broad routes as the
+evidence permits; a reasonable transition discontinuity is acceptable here. A permissive public
+policy does not prove that a particular accelerator route ran, so roofline evidence must identify
+and measure the implementation that production dispatch actually selects. These are completion
+requirements for the large-extent region, not a mandatory position in the development order.
+
+Choose the development surface from the requested complete Op. A related simple Op can help
+isolate shared computation when that answers a live design question, but completing a separate
+simple-Op tuning campaign is not a prerequisite for a fused Op. Reuse suitable kernel bodies at
+their output boundary when useful, and evaluate plausible routes through the complete public fused
+Op. Its epilogue, post work, workspace traffic, outputs, and state effects determine its selected
+route and completion evidence; an isolated contraction result cannot substitute for them.
+
+Before timing, qualify each candidate arithmetic profile against the independent oracle. After
+encoding the selected instances and boundaries in production dispatch, requalify boundary and
+interior cases and remeasure the latency curve or throughput anchor through the public Op. The
+temporary sweep and its private entry points are then removed as described above.
+
 An Op-scoped performance claim ends at the public Op boundary. Exact formats, layouts, shapes, and
 extents can be constructed directly by the Op benchmark; they do not authorize loading a model
 artifact or invoking a target, Program, Engine, or whole-round benchmark. Product-route evidence is
@@ -460,7 +559,9 @@ Preserve only the context needed to interpret the result, as required by `AGENTS
 
 ## 8. Change checklist
 
-For a new or changed device transformation:
+For a new or changed device transformation, apply the relevant contract checks below. They do not
+require separate artifacts or a fixed execution order, and unchanged contracts need not be
+rewritten:
 
 1. classify the complete semantic boundary and reject schedule decisions, raw transfers,
    container lifecycle operations, and partial implementation helpers;

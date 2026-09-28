@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/arena.h"
+#include "core/device.h"
 #include "core/tensor.h"
 
 #include <cuda_runtime.h>
@@ -40,20 +41,26 @@ namespace ninfer::ops {
  * with that oracle under the Op's named criterion. All inputs and outputs are non-overlapping.
  * `ws` provides the transient capacity reported above and is scoped to the call; there is no
  * persistent state side effect.
+ * `execution` supplies the stream and the selected device's physical multiprocessor count. The
+ * latter may change private launch decomposition but never the mathematical result.
  */
 void gdn_gating_proj(const Tensor& x, const Weight& a_weight, const Weight& b_weight,
                      const Tensor& A_log, const Tensor& dt_bias, WorkspaceArena& ws, Tensor& g,
-                     Tensor& beta, cudaStream_t stream);
+                     Tensor& beta, DeviceExecutionView execution);
 
 /**
- * Qwen3.6-35B-A3B exact storage domain. `ab_weight` is one contiguous BF16_CTRL [64,2048]
- * parent whose rows [0,32) and [32,64) are A and B. The implementation consumes those halves
- * as zero-copy views and produces FP32 g/beta [32,T] under the same logical formula and oracle.
- * All other effects and non-overlap requirements match the two-weight form.
+ * Registered contiguous-parent storage forms of gdn_gating_proj:
+ *
+ * - Qwen3.8-27B: BF16_CTRL `ab_weight [96,5120]`, with A in rows [0,48) and B in [48,96);
+ * - Qwen3.6-35B-A3B: BF16_CTRL `ab_weight [64,2048]`, with A in rows [0,32) and B in [32,64).
+ *
+ * The complete immutable parent is the public weight. Its halves are consumed as zero-copy views
+ * and produce FP32 g/beta `[heads,T]` under the same logical formula and oracle. All other effects
+ * and non-overlap requirements match the two-weight form.
  */
 void gdn_gating_proj(const Tensor& x, const Weight& ab_weight, const Tensor& A_log,
                      const Tensor& dt_bias, WorkspaceArena& ws, Tensor& g, Tensor& beta,
-                     cudaStream_t stream);
+                     DeviceExecutionView execution);
 
 /**
  * Applies the Qwen3.6 GDN input RMSNorm and control projection as one semantic Op:
@@ -71,17 +78,19 @@ void gdn_gating_proj(const Tensor& x, const Weight& ab_weight, const Tensor& A_l
  * through h. Private tensor-core operand staging remains an implementation choice. The tensor and
  * weight domains otherwise match the two-weight gdn_gating_proj form. The implementation may fuse
  * or compose its internal kernels for any positive T; that route is not observable at this
- * boundary.
+ * boundary. A contiguous [hidden,W,B] block is presented as the matrix with T=W*B; each
+ * column has its own norm and controls. DFlash2 target verification uses W=2..16, B=1..8
+ * (T<=128), without restricting the positive-T matrix contract.
  */
 void gdn_norm_gating_proj(const Tensor& x, const Tensor& norm_weight, float eps,
                           const Weight& a_weight, const Weight& b_weight, const Tensor& A_log,
                           const Tensor& dt_bias, WorkspaceArena& ws, Tensor& h, Tensor& g,
-                          Tensor& beta, cudaStream_t stream);
+                          Tensor& beta, DeviceExecutionView execution);
 
-/** Qwen3.6-35B-A3B contiguous-parent storage form of gdn_norm_gating_proj. */
+/** The Qwen3.8-27B and Qwen3.6-35B-A3B contiguous-parent storage forms described above. */
 void gdn_norm_gating_proj(const Tensor& x, const Tensor& norm_weight, float eps,
                           const Weight& ab_weight, const Tensor& A_log, const Tensor& dt_bias,
                           WorkspaceArena& ws, Tensor& h, Tensor& g, Tensor& beta,
-                          cudaStream_t stream);
+                          DeviceExecutionView execution);
 
 } // namespace ninfer::ops

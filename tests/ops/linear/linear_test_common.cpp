@@ -1,6 +1,8 @@
 #include "ops/linear/linear_test_common.h"
 
 #include "core/arena.h"
+#include "core/decode_graph.h"
+#include "core/device.h"
 #include "ops/op_tester.h"
 
 #include <cuda_runtime.h>
@@ -14,6 +16,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -29,6 +32,7 @@ constexpr std::uint8_t kOutputPoisonByte  = 0xff;
 constexpr std::size_t kOutputScanWords    = 1U << 20;
 constexpr int kOracleTBlock               = 8;
 constexpr double kBf16UnitRoundoff        = 1.0 / 256.0;
+constexpr double kA8QuantizationAllowance = 0.04;
 constexpr double kA4QuantizationAllowance = 0.16;
 
 // The criterion belongs to the activation compute path, not to a private kernel, schedule, or
@@ -38,6 +42,8 @@ constexpr ReductionCriterion tolerance_for(ActivationCompute activation_compute)
     switch (activation_compute) {
     case ActivationCompute::A16:
         return {kBf16UnitRoundoff, kBf16UnitRoundoff, 2.0 * kBf16UnitRoundoff};
+    case ActivationCompute::A8:
+        return {kA8QuantizationAllowance, kBf16UnitRoundoff, 1.5 * kA8QuantizationAllowance};
     case ActivationCompute::A4:
         return {kA4QuantizationAllowance, kBf16UnitRoundoff, kA4QuantizationAllowance};
     }
@@ -236,6 +242,10 @@ quantized_weight::PackedWeight make_nvfp4_weight(std::int32_t n, std::int32_t k,
     return quantized_weight::make_patterned_weight(QType::NVFP4, n, k, seed, options);
 }
 
+quantized_weight::PackedWeight make_fp8_weight(std::int32_t n, std::int32_t k, std::uint32_t seed) {
+    return quantized_weight::make_patterned_weight(QType::FP8_E4M3FN_ROW_BF16S, n, k, seed);
+}
+
 void cpu_linear_gemm_fp64(const float* weight, const float* activation, double* output,
                           std::int32_t n, std::int32_t k, std::int32_t t) {
     if (weight == nullptr || activation == nullptr || output == nullptr || n <= 0 || k <= 0 ||
@@ -328,44 +338,94 @@ int run_shape(std::string_view label, ActivationCompute activation_compute,
         const std::size_t capacity = ops::linear_workspace_capacity_bytes(
             weight.qtype, shape.n, shape.k, invocation.policy, invocation.t, invocation.t);
         DeviceArena workspace(std::max<std::size_t>(capacity, 256));
-        try {
+        std::unique_ptr<DeviceContext> graph_context;
+        DecodeGraphDefinition graph_definition;
+        DecodeGraphExecutable graph;
+        if (invocation.graph_replay) graph_context = std::make_unique<DeviceContext>();
+        const cudaStream_t stream = graph_context ? graph_context->stream : nullptr;
+        const auto launch         = [&] {
             if (invocation.call_form == CallForm::A16Convenience) {
-                ops::linear(input, weight, destination, nullptr);
+                ops::linear(input, weight, destination, stream);
             } else {
-                ops::linear(input, weight, destination, invocation.policy, workspace, nullptr);
+                ops::linear(input, weight, destination, invocation.policy, workspace, stream);
             }
-            cuda_check(cudaDeviceSynchronize(), "synchronize linear");
+        };
+        try {
+            if (invocation.graph_replay) {
+                cuda_check(cudaDeviceSynchronize(), "finish input initialization before capture");
+                graph_definition.capture(stream, launch);
+                graph.instantiate(graph_definition);
+            }
+            for (int replay = 0; replay < (invocation.graph_replay ? 2 : 1); ++replay) {
+                if (replay == 1) {
+                    // BF16 negation is exact. Evaluate the same FP64 oracle using -X below.
+                    auto negative = activation_bits;
+                    for (auto& bits : negative) bits ^= 0x8000;
+                    device_activation.copy_from_host(negative.data(), device_activation.bytes);
+                }
+                output.poison();
+                cuda_check(cudaDeviceSynchronize(), "finish poisoning before replay");
+                if (invocation.graph_replay)
+                    graph.launch(stream);
+                else
+                    launch();
+                cuda_check(cudaStreamSynchronize(stream), "synchronize linear");
+                if (workspace.peak_used() > capacity || workspace.used() != 0) {
+                    std::cerr << case_label << ": workspace query/scope mismatch\n";
+                    ++failures;
+                }
+
+                failures += output.verify_guards(case_label);
+                const std::vector<std::int32_t> columns = shape.comparison == Comparison::Full
+                                                              ? all_indices(invocation.t)
+                                                              : sampled_indices(invocation.t);
+                OutputRead actual = read_output(output.data(), shape.n, invocation.t, oracle_rows,
+                                                columns, case_label);
+                failures += actual.failures;
+
+                if (shape.comparison == Comparison::Full) {
+                    std::span<const double> reference(
+                        full_reference.data(),
+                        checked_elements(shape.n, invocation.t, "reference prefix"));
+                    std::vector<double> negative_reference;
+                    if (replay == 1) {
+                        negative_reference.assign(reference.begin(), reference.end());
+                        for (double& value : negative_reference) value = -value;
+                        reference = negative_reference;
+                    }
+                    failures +=
+                        compare_output(case_label, actual.selected, reference, activation_compute);
+                } else {
+                    std::vector<float> activation =
+                        materialize_activation(activation_bits, shape.k, columns);
+                    if (replay == 1)
+                        for (float& value : activation) value = -value;
+                    std::vector<double> reference(checked_elements(
+                        static_cast<std::int32_t>(oracle_rows.size()),
+                        static_cast<std::int32_t>(columns.size()), "sampled reference"));
+                    cpu_linear_gemm_fp64(oracle_weight.data(), activation.data(), reference.data(),
+                                         static_cast<std::int32_t>(oracle_rows.size()), shape.k,
+                                         static_cast<std::int32_t>(columns.size()));
+                    failures +=
+                        compare_output(case_label, actual.selected, reference, activation_compute);
+                }
+                if (replay == 1) {
+                    std::vector<std::uint16_t> after(activation_bits.size());
+                    device_activation.copy_to_host(after.data(), device_activation.bytes);
+                    for (std::size_t i = 0; i < after.size(); ++i) {
+                        if (after[i] != (activation_bits[i] ^ 0x8000)) {
+                            std::cerr << case_label << ": modified graph activation input\n";
+                            ++failures;
+                            break;
+                        }
+                    }
+                    device_activation.copy_from_host(activation_bits.data(),
+                                                     device_activation.bytes);
+                }
+            }
         } catch (const std::exception& error) {
             std::cerr << case_label << ": unexpected exception: " << error.what() << '\n';
             ++failures;
-            continue;
-        }
-
-        failures += output.verify_guards(case_label);
-        const std::vector<std::int32_t> columns = shape.comparison == Comparison::Full
-                                                      ? all_indices(invocation.t)
-                                                      : sampled_indices(invocation.t);
-        OutputRead actual =
-            read_output(output.data(), shape.n, invocation.t, oracle_rows, columns, case_label);
-        failures += actual.failures;
-
-        if (shape.comparison == Comparison::Full) {
-            failures +=
-                compare_output(case_label, actual.selected,
-                               std::span<const double>(
-                                   full_reference.data(),
-                                   checked_elements(shape.n, invocation.t, "reference prefix")),
-                               activation_compute);
-        } else {
-            const std::vector<float> activation =
-                materialize_activation(activation_bits, shape.k, columns);
-            std::vector<double> reference(
-                checked_elements(static_cast<std::int32_t>(oracle_rows.size()),
-                                 static_cast<std::int32_t>(columns.size()), "sampled reference"));
-            cpu_linear_gemm_fp64(oracle_weight.data(), activation.data(), reference.data(),
-                                 static_cast<std::int32_t>(oracle_rows.size()), shape.k,
-                                 static_cast<std::int32_t>(columns.size()));
-            failures += compare_output(case_label, actual.selected, reference, activation_compute);
         }
     }
 

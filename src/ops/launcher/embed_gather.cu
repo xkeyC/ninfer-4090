@@ -16,6 +16,30 @@ constexpr int kQ6GroupedBlock = kEmbedGatherQ6Group * kEmbedGatherQ6GroupsPerBlo
 constexpr int kW8GroupedBlock = 32;
 constexpr int kW8RowBlock     = 256;
 
+template <int BlocksPerToken, int Threads>
+void launch_fp8(const Tensor& ids, const Weight& table, Tensor& out, cudaStream_t stream) {
+    const int grid = ids.ne[0] * BlocksPerToken;
+    embed_gather_fp8_kernel<BlocksPerToken, Threads><<<grid, Threads, 0, stream>>>(
+        static_cast<const std::int32_t*>(ids.data), static_cast<const std::uint8_t*>(table.qdata),
+        static_cast<const __nv_bfloat16*>(table.scales), static_cast<__nv_bfloat16*>(out.data));
+}
+
+template <int Blocks, int Threads>
+void launch_w8_packed(const Tensor& ids, const Weight& table, Tensor& out, cudaStream_t stream) {
+    const auto launch = [&]<bool PairStore>() {
+        embed_gather_w8_packed_5120_kernel<Blocks, Threads, PairStore>
+            <<<ids.ne[0] * Blocks, Threads, 0, stream>>>(
+                static_cast<const std::int32_t*>(ids.data),
+                static_cast<const std::uint8_t*>(table.qdata),
+                static_cast<const std::uint8_t*>(table.scales),
+                static_cast<__nv_bfloat16*>(out.data));
+    };
+    if (reinterpret_cast<std::uintptr_t>(out.data) % 4 == 0)
+        launch.template operator()<true>();
+    else
+        launch.template operator()<false>();
+}
+
 int grid_for(std::int64_t n) {
     return static_cast<int>(
         std::max<std::int64_t>(1, div_up(n, static_cast<std::int64_t>(kBlock))));
@@ -105,10 +129,32 @@ void embed_gather_w8_launch(const Tensor& ids, const Weight& table, Tensor& out,
         return;
     }
 
+    // Four signed codes share their exact group scale. Keep byte-addressed tables on the
+    // scalar reader and preserve two-byte output alignment through the packed kernel's stores.
+    if (d == 5120 && table.padded_shape[1] == 5120 &&
+        reinterpret_cast<std::uintptr_t>(table.qdata) % 4 == 0) {
+        if (T <= 128)
+            launch_w8_packed<10, 128>(ids, table, out, stream);
+        else
+            launch_w8_packed<5, 128>(ids, table, out, stream);
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
+
     const std::int64_t n = static_cast<std::int64_t>(d) * T;
     embed_gather_w8_kernel<<<grid_for(n), kBlock, 0, stream>>>(
         static_cast<const std::int32_t*>(ids.data), codes, scales,
         static_cast<__nv_bfloat16*>(out.data), d, T, table.padded_shape[1]);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void embed_gather_fp8_launch(const Tensor& ids, const Weight& table, Tensor& out,
+                             cudaStream_t stream) {
+    const std::int32_t T = ids.ne[0];
+    if (T <= 176)
+        launch_fp8<10, 128>(ids, table, out, stream);
+    else
+        launch_fp8<5, 128>(ids, table, out, stream);
     CUDA_CHECK(cudaGetLastError());
 }
 
