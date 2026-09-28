@@ -803,6 +803,37 @@ curl http://127.0.0.1:8080/v1/models \
 
 `--cors` adds permissive browser CORS headers. It is disabled by default.
 
+## YaRN context extension
+
+Qwen3.8-27B supports optional static YaRN through `--rope-yarn-factor F` (1 to 4, default 1) and
+`--rope-original-max-position 262144`. Factor 1 uses the unchanged native RoPE path. The reference
+window is 262,144 even though this fork has a larger compiled attention-address envelope. With YaRN
+enabled, `--max-context` must not exceed `262144 * F`; a 1.5x profile uses `--max-context 393216`.
+Size `--kv-capacity` separately for all active and retained sessions.
+
+The implementation follows Qwen's published `rope_parameters` and Hugging Face Transformers YaRN:
+theta 10,000,000, rotary dimension 64 of a 256-dimensional head, beta_fast 32, beta_slow 1,
+floor/ceil frequency-ramp boundaries, and cos/sin amplitude `1 + 0.1 * ln(F)`. Main Text, MTP and
+three-axis MRoPE use the same immutable, per-Program coefficients. The Vision tower's independent
+2-D RoPE stays native. No model conversion or weight download is needed.
+
+Coefficients are CUDA launch/graph values rather than process-global mutable device symbols. Saved
+slot files bind to the YaRN algorithm version, factor and original window: a session saved under
+native RoPE or another factor is refused by a scaled Engine. Reuse the original full conversation to
+rebuild its state after changing the factor. Engine-resident and Host-retained context is
+process-local, so a restart with another factor starts it from root.
+
+This option is restricted to registered Qwen3.8-27B artifacts and cannot be combined with
+`--spec dflash2`, whose draft keeps its own native RoPE geometry. Static YaRN may change
+short-context output; successful memory allocation is not evidence of long-context quality. Test
+the intended retrieval, vision and generation workload before relying on the extended window.
+
+References: [Qwen3.8-27B official parameters](https://huggingface.co/Qwen/Qwen3.8-27B#best-practices),
+[Transformers YaRN reference](https://github.com/huggingface/transformers/blob/main/src/transformers/modeling_rope_utils.py),
+and [splickz's NInfer YaRN work](https://github.com/splickz/ninfer-yarn-nvfp4). The latter informed
+the integration review; this implementation keeps coefficients owned by each Program rather than
+installing global CUDA tables.
+
 ## Server options
 
 The table lists executable defaults. The startup example selects a long-context FP8/MTP3 profile.
@@ -839,6 +870,8 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--lm-head-draft` | optimized proposal head | off |
 | `--default-max-tokens N` | output limit when omitted by a request | `8192` |
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
+| `--rope-yarn-factor F` | static YaRN factor for Qwen3.8-27B Text/MTP RoPE, 1 to 4; see [YaRN](#yarn-context-extension) | `1` |
+| `--rope-original-max-position N` | YaRN reference window; must be the native 262144 | `262144` |
 | `--vision` | enable media input and load Vision GPU allocations | off |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
 | `--no-prefix-reuse` | disable compatible-prefix caching | prefix reuse on |

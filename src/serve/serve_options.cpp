@@ -1,5 +1,6 @@
 #include "serve/serve_options.h"
 #include "product/speculative_options.h"
+#include "runtime/contract/yarn.h"
 
 #include <algorithm>
 
@@ -88,6 +89,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8] "
            "[--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
+           "[--rope-yarn-factor F] [--rope-original-max-position N] "
            "[--vision] [--vision-max-tokens N] [--no-cuda-graph] [--no-prefix-reuse] "
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] [--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
@@ -324,6 +326,12 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.default_thinking_budget = static_cast<std::uint32_t>(budget);
         } else if (arg == "--vision") {
             options.enable_vision = true;
+        } else if (arg == "--rope-yarn-factor") {
+            options.yarn.factor =
+                parse_float_in(require_value(arg.c_str()), arg.c_str(), 1.0F, 4.0F);
+        } else if (arg == "--rope-original-max-position") {
+            options.yarn.original_context = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value(arg.c_str()), arg.c_str()));
         } else if (arg == "--vision-max-tokens" || arg == "--vision-limit") {
             const int val = parse_nonnegative_int(require_value(arg.c_str()), "vision-max-tokens");
             if (val <= 0) {
@@ -412,6 +420,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         throw std::invalid_argument("--prefill-chunk must be a positive multiple of 128");
     }
     product::validate_speculative_cli_options(options.speculative);
+    runtime::validate_yarn(options.yarn, options.max_context);
     if (default_max_tokens_explicit) {
         if (options.default_max_tokens <= 0) {
             throw std::invalid_argument("--default-max-tokens must be positive");

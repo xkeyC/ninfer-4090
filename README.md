@@ -252,6 +252,14 @@ For a native build, follow the [Linux build guide](docs/rtx-3090-linux.md) with
 `CMAKE_CUDA_ARCHITECTURES=89` (the default in this fork). The build requires CUDA 12.8 or newer,
 GCC 13, and CMake 3.28 or newer; the Docker image builds with CUDA 13.1.
 
+## Optional YaRN for Qwen3.8-27B
+
+`--rope-yarn-factor 1.5 --rope-original-max-position 262144 --max-context 393216`
+extends the per-request window using Qwen's published static YaRN recipe. Native behavior is
+the default (`--rope-yarn-factor 1`). Text, MTP and multimodal MRoPE share per-Program
+coefficients; the Vision tower stays native. See [serving](docs/serving.md#yarn-context-extension)
+for cache compatibility and validation scope.
+
 ## What this fork changes
 
 - **`sm_89` retarget.** The CMake architecture pin, the runtime compute-capability check, and the

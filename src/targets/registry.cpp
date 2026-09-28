@@ -5,6 +5,7 @@
 #include "artifact/reader.h"
 #include "core/device.h"
 #include "core/startup.h"
+#include "runtime/contract/yarn.h"
 #include "runtime/engine/kv_capacity.h"
 #include "runtime/engine/context_cost.h"
 
@@ -196,12 +197,21 @@ Qwen3_6_35BA3BInstance::~Qwen3_6_35BA3BInstance() = default;
 
 ConstructedTarget construct_target(const EngineOptions& options, DeviceContext& device) {
     validate_options(options);
+    runtime::validate_yarn(options.yarn, options.max_context);
+    if (options.yarn.factor > 1.0F &&
+        options.speculative.backend == SpeculativeBackend::DFlash2) {
+        // The DFlash2 draft keeps its own native RoPE geometry; the pairing is unqualified.
+        throw std::invalid_argument("YaRN cannot be combined with --spec dflash2");
+    }
     const auto load_start = Clock::now();
 
     StartupPhaseScope inspect_phase(options.startup_observer, StartupPhase::ArtifactInspect);
     artifact::Reader reader(options.artifact_path);
     inspect_phase.complete();
     const auto& identity = reader.identity();
+    if (options.yarn.factor > 1.0F && identity.model_id != Qwen3_6_27B::qwen3_8_model_id) {
+        throw std::invalid_argument("YaRN is supported only for the registered Qwen3.8-27B target");
+    }
     if (identity.model_id == Qwen3_6_27B::model_id) {
         return construct_registered<Qwen3_6_27B, LoadedQwen3_6_27B, Qwen3_6_27BInstance>(
             options, device, reader, load_start, Qwen3_6_27B::target_key);

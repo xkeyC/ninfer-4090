@@ -1,5 +1,6 @@
 #include "options.h"
 #include "product/speculative_options.h"
+#include "runtime/contract/yarn.h"
 
 #include <cerrno>
 #include <cmath>
@@ -91,7 +92,8 @@ std::string usage_text(const char* argv0) {
            "       [--presence-penalty F] [--frequency-penalty F] [--seed N] [--greedy]\n"
            "       [--stop-token-id N]... [--stop <text>]... [--reasoning-stop <text>]...\n"
            "       [--raw-output] [--print-token-ids] [--no-thinking] [--thinking-budget N]\n"
-           "       [--reasoning-effort low|medium|xhigh] [--vision] [--vision-max-tokens N]\n"
+           "       [--reasoning-effort low|medium|xhigh] [--rope-yarn-factor F]\n"
+           "       [--rope-original-max-position N] [--vision] [--vision-max-tokens N]\n"
            "       [--no-cuda-graph]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n"
            "\n"
@@ -161,6 +163,10 @@ Options parse_options(int argc, char** argv) {
             options.reasoning_effort = parse_reasoning_effort(value(arg));
         } else if (arg == "--vision") {
             options.enable_vision = true;
+        } else if (arg == "--rope-yarn-factor") {
+            options.yarn.factor = parse_float(value(arg), arg, 1.0F, 4.0F);
+        } else if (arg == "--rope-original-max-position") {
+            options.yarn.original_context = parse_u32(value(arg), arg);
         } else if (arg == "--vision-max-tokens" || arg == "--vision-limit") {
             options.vision_max_tokens = parse_u32(value(arg), "vision-max-tokens", false);
             options.enable_vision     = true;
@@ -225,6 +231,7 @@ Options parse_options(int argc, char** argv) {
         throw std::invalid_argument("--kv-capacity must be at least --max-context");
     }
     product::validate_speculative_cli_options(options.speculative);
+    runtime::validate_yarn(options.yarn, options.max_context);
     if (!options.enable_thinking && options.reasoning_effort) {
         throw std::invalid_argument("--reasoning-effort cannot be combined with --no-thinking");
     }

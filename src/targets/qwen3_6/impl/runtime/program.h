@@ -620,6 +620,7 @@ public:
     friend struct qwen3_6::detail::PressurePlanningSessionImpl<Variant>;
 
     const LoadedModelData& model;
+    const ops::TextRopeScaling rope_scaling;
     DeviceContext& device;
     const std::uint32_t capacity;
     const std::uint32_t kv_capacity;

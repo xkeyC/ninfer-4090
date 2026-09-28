@@ -246,7 +246,10 @@ Run `./build/apps/ninfer --help` for the exact option contract.
 
 The registered model IDs have a native context limit of 262,144 tokens. The practical
 allocation on one RTX 4090 depends on the selected artifact, media workload, output budget, and
-KV-cache type.
+KV-cache type. Qwen3.8-27B can extend the window with static YaRN:
+`--rope-yarn-factor F --rope-original-max-position 262144` (F in 1..4, default 1) admits
+`--max-context` up to `262144 * F`; see [serving](serving.md#yarn-context-extension) for the
+coefficients, saved-session compatibility, and quality caveats.
 Use `--kv-dtype int8` for the maximum-precision profile. `--kv-dtype fp8` selects row-scaled
 E4M3 D256 KV storage. The compressed modes store Hadamard-rotated keys and 4-bit values:
 

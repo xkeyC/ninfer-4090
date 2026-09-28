@@ -745,7 +745,8 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
 
 ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const SequencePlanImpl& plan,
                                  DeviceContext& device_in, const StartupObserver& startup_observer)
-    : model(model_in), device(device_in), capacity(plan.capacity), kv_capacity(plan.kv_capacity),
+    : model(model_in), rope_scaling(plan.rope_scaling), device(device_in), capacity(plan.capacity),
+      kv_capacity(plan.kv_capacity),
       max_concurrency(plan.max_concurrency), context_cache(plan.context_cache),
       continuation_capacity(normalized_private_capacity(plan.context_cache)),
       shared_prefix_capacity(plan.context_cache.max_shared_prefixes.value_or(0)),
@@ -11212,7 +11213,8 @@ void ProgramImplCore::prepare_graphs() {
                                        io,
                                        prefill_hidden,
                                        prefill_chunk,
-                                       proposal_head};
+                                       proposal_head,
+                                       &rope_scaling};
     };
 
     if (speculative_backend == SpeculativeBackend::None) {

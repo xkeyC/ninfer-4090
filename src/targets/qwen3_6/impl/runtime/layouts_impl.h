@@ -724,6 +724,8 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     }
     auto impl                 = std::make_unique<SequencePlanImpl>();
     impl->weights_profile     = inputs.weights_profile;
+    impl->rope_scaling        = ops::make_text_yarn_scaling(
+        inputs.yarn.factor, inputs.yarn.original_context, TextConfig::rope_theta);
     impl->capacity            = inputs.capacity;
     impl->main_page_groups    = main_page_groups;
     impl->kv_capacity         = static_cast<std::uint32_t>(checked_i32(
@@ -812,6 +814,7 @@ make_sequence_planner_impl(DeviceContext& device, const EngineOptions& options,
     validate_target_options(device, options);
     SequencePlanningInputs inputs{
         .weights_profile     = weights_profile,
+        .yarn                = options.yarn,
         .capacity            = options.max_context,
         .max_concurrency     = options.max_concurrency,
         .prefill_chunk       = std::min(options.prefill_chunk, options.max_context),

@@ -5,6 +5,7 @@
 #include "core/startup.h"
 #include "runtime/contract/sampling.h"
 #include "runtime/contract/types.h"
+#include "runtime/contract/yarn.h"
 #include "runtime/engine/causal_score_core.h"
 #include "runtime/engine/engine_core.h"
 #include "runtime/engine/slot_spill_guard.h"
@@ -228,8 +229,11 @@ GenerationResult GenerationHandle::wait(OutputSink* sink, const CancellationView
 
 namespace {
 
-std::string slot_model_binding(const LoadSummary& load) {
-    return load.target + '\n' + load.model_id + '\n' + load.weights_id;
+// A saved session is bound to the positional transform that produced its KV, so a YaRN
+// factor change cannot restore keys rotated under another factor.
+std::string slot_model_binding(const LoadSummary& load, const EngineOptions& options) {
+    return load.target + '\n' + load.model_id + '\n' + load.weights_id +
+           runtime::yarn_cache_binding(options.yarn);
 }
 
 } // namespace
@@ -282,7 +286,7 @@ public:
                                               targets::qwen3_6::RetainedSessionSnapshot&&)>());
                                   }) {
                         constructed_core->set_eviction_sink(
-                            slot_model_binding(load),
+                            slot_model_binding(load, options),
                             [this](std::string path,
                                    targets::qwen3_6::RetainedSessionSnapshot&& snapshot) {
                                 enqueue_write(std::move(path), std::move(snapshot));
@@ -700,7 +704,7 @@ SlotSaveResult Engine::save_slot(std::uint32_t lane, const std::string& path,
     const auto started = std::chrono::steady_clock::now();
     // A pending auto-save of the same path must not land after this explicit save.
     impl_->drain_writes();
-    const std::string binding = slot_model_binding(impl_->load);
+    const std::string binding = slot_model_binding(impl_->load, impl_->options);
     targets::qwen3_6::RetainedSessionSnapshot snapshot = std::visit(
         [&](auto& core) -> targets::qwen3_6::RetainedSessionSnapshot {
             if constexpr (requires { core->save_retained_lane(lane, binding, expected_digest,
@@ -741,7 +745,7 @@ SlotRestoreResult Engine::restore_slot(std::uint32_t lane, const std::string& pa
     if (!file.good()) { throw std::invalid_argument("failed to read session snapshot file"); }
     file.close();
 
-    const std::string binding = slot_model_binding(impl_->load);
+    const std::string binding = slot_model_binding(impl_->load, impl_->options);
     auto restored = std::visit(
         [&](auto& core) -> std::pair<std::uint32_t, std::string> {
             const std::span<const std::uint8_t> bytes(snapshot.data(), snapshot.size());

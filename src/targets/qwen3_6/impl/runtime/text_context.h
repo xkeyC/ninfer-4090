@@ -8,6 +8,7 @@
 #include "core/gdn_replay_records.h"
 #include "core/tensor.h"
 #include "core/weight.h"
+#include "ninfer/ops/rope.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/softmax_attention.h"
 #include "ninfer/ops/sparse_moe.h"
@@ -161,6 +162,9 @@ public:
                 const qwen3_6::PagedKVCache* batch_mtp_kv  = nullptr);
     ~TextContext();
 
+    // Static YaRN coefficients for Text/MTP RoPE; null keeps native RoPE. Owned by the Program.
+    void set_rope_scaling(const ops::TextRopeScaling* value) noexcept { rope_scaling_ = value; }
+
     TextContext(const TextContext&)            = delete;
     TextContext& operator=(const TextContext&) = delete;
 
@@ -240,6 +244,7 @@ public:
                              const Tensor& position, ops::CausalAttentionExecutionEnvelope envelope,
                              Tensor& mtp_hidden, Tensor& logits, Tensor& draft_token);
 private:
+    const ops::TextRopeScaling* rope_scaling_ = nullptr;
     void bind();
 
     [[nodiscard]] bool mtp_enabled() const noexcept {
