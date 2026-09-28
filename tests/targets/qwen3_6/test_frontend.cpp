@@ -1623,13 +1623,79 @@ int test_vision_max_tokens_bounds_each_item() {
                                     data.vision_items.size() == kItems,
                                 "vision_max_tokens capped the aggregate prompt instead of each item");
 
-    try {
-        (void)frontend.prepare(image_text_input(block_ppm(1280, 1024, 127), {}, "over-item.ppm"));
-        failures += check(false, "an item over vision_max_tokens was admitted");
-    } catch (const ninfer::RequestError& error) {
-        failures += check(error.kind() == ninfer::RequestErrorKind::MediaBudgetExceeded,
-                          "an item over vision_max_tokens used the wrong request-error kind");
+    // 1280x1024 aligns to a 40x32 merged grid (1280 tokens). It must be downsized, aspect
+    // preserving, into the 1024-token item capacity rather than rejected, and token counting must
+    // select the same geometry as preparation.
+    const std::uint32_t counted =
+        frontend.count_tokens(image_text_input(block_ppm(1280, 1024, 127), {}, "over-item.ppm"));
+    const auto over_item =
+        frontend.prepare(image_text_input(block_ppm(1280, 1024, 127), {}, "over-item.ppm"));
+    const auto& over_data = FrontendFactory::inspect(over_item);
+    failures += check(over_data.vision_items.size() == 1 && over_data.prepare.vision_tokens == 980 &&
+                          over_data.token_ids.size() == counted,
+                      "an item over vision_max_tokens was not downsized into the item capacity");
+    if (over_data.vision_items.size() == 1) {
+        const auto& grid = over_data.vision_items.front().grid;
+        failures += check(grid.temporal == 1 && grid.height == 56 && grid.width == 70,
+                          "downsized item lost its aspect ratio");
     }
+    return failures;
+}
+
+// Vision tokens are bounded only by the context: a prompt whose images sum past the former fixed
+// 32768-token aggregate stays admissible when it fits max_context.
+int test_vision_prompt_bounded_only_by_context() {
+    ninfer::targets::qwen3_6::FrontendOptions options;
+    options.max_context     = 65'536;
+    const Frontend frontend = FrontendFactory::create_component(resources(), options);
+
+    constexpr std::size_t kItems          = 33;
+    constexpr std::uint64_t kItemTokens   = 32 * 32;
+    const std::vector<std::uint8_t> bytes = block_ppm(1024, 1024, 127);
+    ninfer::ChatMessage message;
+    message.role = ninfer::ChatRole::User;
+    for (std::size_t index = 0; index < kItems; ++index) {
+        ninfer::OwnedMedia media;
+        media.kind        = ninfer::MediaKind::Image;
+        media.bytes       = bytes;
+        media.media_type  = "image/x-portable-pixmap";
+        media.source_name = "screen-" + std::to_string(index) + ".ppm";
+        message.parts.push_back(ninfer::MessagePart{
+            .kind = ninfer::MessagePartKind::Media, .text = {}, .media = std::move(media)});
+    }
+    ninfer::PromptInput input;
+    input.messages.push_back(std::move(message));
+    const auto prepared = frontend.prepare(std::move(input));
+    const auto& data    = FrontendFactory::inspect(prepared);
+    return check(data.prepare.vision_tokens == kItems * kItemTokens &&
+                     data.prepare.vision_tokens > 32'768 && data.vision_items.size() == kItems,
+                 "Vision tokens were capped below max_context");
+}
+
+// oversized_image=error forbids the item-capacity downsize as well as the native pixel downsize.
+int test_item_capacity_respects_resize_rejection() {
+    ninfer::targets::qwen3_6::FrontendOptions options;
+    options.max_context       = 65'536;
+    options.vision_max_tokens = 256;
+    const Frontend frontend   = FrontendFactory::create_component(resources(), options);
+
+    // 1024x768 is within the native pixel bound but needs 768 tokens.
+    ninfer::PromptInput strict = image_text_input(block_ppm(1024, 768, 127), {}, "strict.ppm");
+    strict.messages[0].parts[0].media.image_resize_policy =
+        ninfer::ImageResizePolicy::RejectOversized;
+    int failures = 0;
+    try {
+        (void)frontend.count_tokens(std::move(strict));
+        failures += check(false, "oversized_image=error allowed an item-capacity downsize");
+    } catch (const ninfer::RequestError& error) {
+        failures += check(error.kind() == ninfer::RequestErrorKind::InvalidMedia,
+                          "item-capacity rejection used the wrong request-error classification");
+    }
+    const auto relaxed = frontend.prepare(image_text_input(block_ppm(1024, 768, 127), {}, "fit.ppm"));
+    const auto& data   = FrontendFactory::inspect(relaxed);
+    failures += check(data.vision_items.size() == 1 && data.prepare.vision_tokens <= 256 &&
+                          data.prepare.vision_tokens > 0,
+                      "default resize policy did not downsize into the item capacity");
     return failures;
 }
 
@@ -2381,6 +2447,8 @@ int main() {
     failures += test_automatic_private_anchor_opportunities();
     failures += test_media_admission_uses_aggregate_resources(frontend);
     failures += test_vision_max_tokens_bounds_each_item();
+    failures += test_vision_prompt_bounded_only_by_context();
+    failures += test_item_capacity_respects_resize_rejection();
     failures += test_multimodal_prompt_over_removed_32k_cap(frontend);
     failures += test_attention_pairs_are_diagnostic(frontend);
     failures += test_video_prepare(frontend);

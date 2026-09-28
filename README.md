@@ -208,15 +208,15 @@ docker run --rm --gpus all --publish 8080:8080 \
 
 The vision tower encodes one image at a time, so the scratchpad bounds the size
 of each image, not the number of images or the conversation depth. One
-1024x1024 image costs 1026 vision tokens, and the default admits a single image
-of up to about 2880x2880 pixels. All images in one request share the upstream
-aggregate budget of `min(--max-context, 32768)` vision tokens. Agent clients
-send every earlier image again with each turn, so that aggregate is what a long
-conversation with screenshots uses up. The server rejects an image over the
-scratchpad, or a request over the aggregate, with `media_budget_exceeded`
-before the request reaches the encoder. For large single images or dense video,
-raise the limit with `--vision-max-tokens`. Each additional 1024 tokens of
-scratchpad costs about 62 MiB of VRAM.
+1024x1024 image costs 1026 vision tokens. An image or video over the scratchpad
+is downsized, keeping its aspect ratio, until it fits; only a request that sets
+`oversized_image` to `error` is rejected instead. Vision tokens occupy context
+and KV exactly like text tokens, so the number of images in a request is bounded
+only by `--max-context`. Agent clients send every earlier image again with each
+turn; a long conversation with screenshots uses up context, not a separate
+image budget. For large single images or dense video, raise the per-image limit
+with `--vision-max-tokens`. Each additional 1024 tokens of scratchpad costs about
+62 MiB of VRAM.
 
 ### The tradeoff
 
@@ -361,9 +361,9 @@ GCC 13, and CMake 3.28 or newer; the Docker image builds with CUDA 13.1.
   Method and measurements in [docs/udp-fork-comparison.md](docs/udp-fork-comparison.md).
 - **Configurable vision scratchpad (ported).** `--vision-max-tokens` comes from the same fork
   and sizes the vision encode workspace (default 8192 tokens, formerly hardcoded 32768). This
-  fork additionally wires the processor's single-item budget to the same limit, so an
-  over-limit image fails as `media_budget_exceeded` instead of reaching an undersized encoder.
-  The aggregate budget over all images in a request stays at upstream's 32768 tokens.
+  fork additionally wires the processor's single-item budget to the same limit and downsizes
+  an over-limit image or video to fit instead of reaching an undersized encoder. The request has
+  no separate aggregate image budget: Vision tokens count against `--max-context` like text.
 
 ## Known limits on the RTX 4090
 

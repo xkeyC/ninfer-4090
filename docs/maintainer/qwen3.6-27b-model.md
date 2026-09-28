@@ -105,9 +105,9 @@ does not cap an Op's `T`.
 
 Vision uses different axes. `P` is the aggregate raw-patch count and must be a positive multiple of
 4 because of the 2x2 spatial merge; `V=P/4` is the aggregate merged-token count. The registered 27B
-processor/implementation envelope is `4<=P<=131072` and `1<=V<=32768`, with the frontend's media,
-attention-pair, and prompt budgets imposing any additional request-specific restriction. These
-Vision columns are not Text token `T` and are not expanded beyond that envelope.
+prompt envelope is `V<=max_context`; each item is executed separately with at most
+`min(vision_max_tokens,16384)` merged tokens, and the frontend downsizes larger media to that item
+bound. These Vision columns are not Text token `T`.
 
 ## 3. Shared decoder layer skeleton
 
@@ -324,9 +324,10 @@ The native processor accepts structured text/image/video message parts. For each
 8. computes `rope_delta` for subsequent Text decode positions.
 
 Images repeat a frame to form the temporal pair. Videos are sampled at the configured rate and
-packed in temporal pairs. Media items have no standalone count limit; aggregate source bytes,
-decoded pixels, 131,072 raw patches, 32,768 merged Vision tokens, and Engine `max_context` admit the
-work. The prepared BF16 rows are the exact host representation copied into Vision execution, so no
+packed in temporal pairs. Each item is downsized, aspect preserving, until its merged tokens fit the
+single-item Vision capacity, and video sampling is capped at two frames per item token. Media items
+have no standalone count limit; aggregate source bytes, per-item decoded pixels, live payload
+memory, and Engine `max_context` admit the work. The prepared BF16 rows are the exact host representation copied into Vision execution, so no
 host FP32 payload or device FP32-to-BF16 staging conversion exists.
 
 ## 10. Vision tower
@@ -421,7 +422,7 @@ Text-prefill, ordinary-round, MTP-prefill, MTP-round, and Vision phase capacitie
 configured execution domains. The one workspace preserves a general execution prefix while a
 Vision item output is live; before that output is produced, Vision encode may reuse the complete
 backing according to checked patch/position, attention, MLP, and merger lifetimes. The registered
-Frontend retains an aggregate prompt budget of `min(max_context,32768)` Vision tokens, while the
+Frontend bounds a prompt's Vision tokens only by `max_context`, while the
 sequential Vision tower and `[5120,V]` handoff use the registered single-item bound
 `V<=min(max_context,16384)`. Multiple items reuse the same handoff after the previous scatter span
 is complete. Text prefill allocations use `min(prefill_chunk,max_context)`.

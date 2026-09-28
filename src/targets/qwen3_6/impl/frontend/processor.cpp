@@ -124,6 +124,74 @@ Size smart_resize_video(int frames, int height, int width, std::uint64_t min_pix
     return {h, w};
 }
 
+// One Vision encode holds one item, so the item budget is the only Vision limit on geometry.
+std::uint64_t item_token_budget(const ProcessorOptions& options) {
+    return std::min(options.max_item_vision_tokens,
+                    options.max_item_raw_patches / kMinimumRawPatchesPerItem);
+}
+
+// Shrinks an aligned grid one merge unit at a time, taking whichever axis keeps the source aspect
+// ratio closer, until `temporal * h * w` merged tokens fit the item budget.
+Size fit_item_token_budget(Size size, int source_height, int source_width, std::uint64_t temporal,
+                           std::uint64_t token_budget) {
+    if (size.h < kFactor || size.w < kFactor || size.h % kFactor != 0 || size.w % kFactor != 0 ||
+        source_height <= 0 || source_width <= 0 || temporal == 0) {
+        throw std::invalid_argument("invalid Vision item budget resize");
+    }
+    std::uint64_t h           = static_cast<std::uint64_t>(size.h / kFactor);
+    std::uint64_t w           = static_cast<std::uint64_t>(size.w / kFactor);
+    const double source_ratio = static_cast<double>(source_height) / source_width;
+    constexpr double kBlocked = std::numeric_limits<double>::infinity();
+    while (checked_mul(temporal, checked_mul(h, w, "vision grid"), "vision grid") > token_budget) {
+        const double reduce_h =
+            h > 1 ? std::abs(std::log((static_cast<double>(h - 1) / w) / source_ratio)) : kBlocked;
+        const double reduce_w =
+            w > 1 ? std::abs(std::log((static_cast<double>(h) / (w - 1)) / source_ratio)) : kBlocked;
+        if (reduce_h == kBlocked && reduce_w == kBlocked) {
+            throw ProcessorError(ProcessorErrorKind::BudgetExceeded,
+                                 "single media item cannot fit Vision execution capacity");
+        }
+        if (reduce_h <= reduce_w) {
+            --h;
+        } else {
+            --w;
+        }
+    }
+    return {static_cast<int>(h * kFactor), static_cast<int>(w * kFactor)};
+}
+
+Size image_item_size(int height, int width, const ProcessorOptions& options) {
+    const std::uint64_t budget     = item_token_budget(options);
+    const std::uint64_t max_pixels = std::min(
+        options.image_max_pixels, checked_mul(budget, kFactor * kFactor, "image item pixels"));
+    const std::uint64_t min_pixels = std::min(options.image_min_pixels, max_pixels);
+    const Size size                = smart_resize_image(height, width, min_pixels, max_pixels);
+    return fit_item_token_budget(size, height, width, 1, budget);
+}
+
+// Every temporal group costs at least one merged token, so the item budget also bounds sampling.
+int video_item_max_frames(const ProcessorOptions& options) {
+    const std::uint64_t frames =
+        std::min<std::uint64_t>(static_cast<std::uint64_t>(options.video_max_frames),
+                                checked_mul(item_token_budget(options), kTemporal, "video frames"));
+    if (frames < static_cast<std::uint64_t>(options.video_min_frames)) {
+        throw ProcessorError(ProcessorErrorKind::BudgetExceeded,
+                             "minimum video frames cannot fit Vision execution capacity");
+    }
+    return static_cast<int>(frames);
+}
+
+Size video_item_size(int frames, int height, int width, const ProcessorOptions& options) {
+    const std::uint64_t budget     = item_token_budget(options);
+    const std::uint64_t max_pixels = std::min(
+        options.video_max_pixels,
+        checked_mul(budget, kTemporal * kFactor * kFactor, "video item pixels"));
+    const std::uint64_t min_pixels = std::min(options.video_min_pixels, max_pixels);
+    const Size size = smart_resize_video(frames, height, width, min_pixels, max_pixels);
+    const std::uint64_t temporal = static_cast<std::uint64_t>((frames + kTemporal - 1) / kTemporal);
+    return fit_item_token_budget(size, height, width, temporal, budget);
+}
+
 double cubic(double x) {
     // Torchvision's antialiased bicubic path uses the Keys/Pillow coefficient.
     constexpr double a = -0.5;
@@ -299,9 +367,8 @@ Prepared prepare_image(std::span<const std::uint8_t> bytes, const ProcessorOptio
                        const media::decode::Policy& policy, MediaPreprocessCache& cache,
                        ConcurrentMediaBudget& request_budget, const PreparationControl& control) {
     media::decode::Image image = media::decode::decode_image(bytes, policy);
-    const Size size = smart_resize_image(image.height, image.width, options.image_min_pixels,
-                                         options.image_max_pixels);
-    const int gh    = size.h / kPatch;
+    const Size size            = image_item_size(image.height, image.width, options);
+    const int gh               = size.h / kPatch;
     const int gw    = size.w / kPatch;
     Prepared out;
     out.item.modality = Modality::Image;
@@ -349,11 +416,11 @@ std::vector<double> video_timestamps(std::span<const int> indices, int temporal_
 Prepared prepare_video(std::span<const std::uint8_t> bytes, const ProcessorOptions& options,
                        const media::decode::Policy& policy, MediaPreprocessCache& cache,
                        ConcurrentMediaBudget& request_budget, const PreparationControl& control) {
-    media::decode::Video video = media::decode::decode_video(
-        bytes, policy, options.video_fps, options.video_min_frames, options.video_max_frames);
+    media::decode::Video video =
+        media::decode::decode_video(bytes, policy, options.video_fps, options.video_min_frames,
+                                    video_item_max_frames(options));
     const Size size =
-        smart_resize_video(static_cast<int>(video.frames.size()), video.height, video.width,
-                           options.video_min_pixels, options.video_max_pixels);
+        video_item_size(static_cast<int>(video.frames.size()), video.height, video.width, options);
     const bool pad_temporal = video.frames.size() % kTemporal != 0;
     const int gt            = static_cast<int>((video.frames.size() + kTemporal - 1) / kTemporal);
     const int gh            = size.h / kPatch;
@@ -434,8 +501,7 @@ std::size_t validate_media_inputs(std::span<ChatPart* const> parts,
 VisionItem inspect_image_item(std::span<const std::uint8_t> bytes, const ProcessorOptions& options,
                               const media::decode::Policy& policy) {
     const media::decode::ImageInfo image = media::decode::inspect_image(bytes, policy);
-    const Size size = smart_resize_image(image.height, image.width, options.image_min_pixels,
-                                         options.image_max_pixels);
+    const Size size                      = image_item_size(image.height, image.width, options);
     VisionItem item;
     item.modality = Modality::Image;
     item.grid     = {1, size.h / kPatch, size.w / kPatch};
@@ -453,7 +519,8 @@ void enforce_image_resize_policy(const ChatPart& part, const ProcessorOptions& o
     const int aligned_w = round_even(static_cast<double>(image.width) / kFactor) * kFactor;
     const std::uint64_t area =
         checked_mul(std::max(aligned_h, 0), std::max(aligned_w, 0), "image area");
-    if (area > options.image_max_pixels) {
+    if (area > options.image_max_pixels ||
+        area / (kFactor * kFactor) > item_token_budget(options)) {
         throw ProcessorError(ProcessorErrorKind::InvalidMedia,
                              "image exceeds the native Vision geometry and oversized_image is "
                              "set to 'error'");
@@ -462,10 +529,10 @@ void enforce_image_resize_policy(const ChatPart& part, const ProcessorOptions& o
 
 VisionItem inspect_video_item(std::span<const std::uint8_t> bytes, const ProcessorOptions& options,
                               const media::decode::Policy& policy) {
-    const media::decode::VideoInfo video = media::decode::inspect_video(
-        bytes, policy, options.video_fps, options.video_min_frames, options.video_max_frames);
-    const Size size = smart_resize_video(video.sampled_frames, video.height, video.width,
-                                         options.video_min_pixels, options.video_max_pixels);
+    const media::decode::VideoInfo video =
+        media::decode::inspect_video(bytes, policy, options.video_fps, options.video_min_frames,
+                                     video_item_max_frames(options));
+    const Size size = video_item_size(video.sampled_frames, video.height, video.width, options);
     const int gt    = (video.sampled_frames + kTemporal - 1) / kTemporal;
     VisionItem item;
     item.modality   = Modality::Video;

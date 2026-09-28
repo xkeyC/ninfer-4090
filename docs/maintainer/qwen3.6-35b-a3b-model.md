@@ -669,9 +669,10 @@ The checkpoint processor accepts image and video media. For each media item it:
 The source processor config uses image pixel-count bounds 65,536 through 16,777,216 and video
 pixel-frame bounds 4,096 through 25,165,824. These are frontend work budgets rather than learned
 model dimensions. Before other limits, the resulting Vision-token count is
-`grid_t × grid_h × grid_w / 4`. Media item count has no independent fixed ceiling. Aggregate source
-bytes, decoded pixels, 131,072 raw patches, 32,768 Vision tokens, live BF16 payload bytes, and
-Engine `max_context` bound the request. The BF16 payload is copied directly into the Vision patch
+`grid_t × grid_h × grid_w / 4`; an item over the single-item Vision capacity is downsized, aspect
+preserving, until it fits. Media item count has no independent fixed ceiling. Aggregate source
+bytes, per-item decoded pixels, live BF16 payload bytes, and Engine `max_context` bound the
+request. The BF16 payload is copied directly into the Vision patch
 projection workspace without retaining an FP32 host copy or running a device cast.
 
 ## 12. Vision tower
@@ -814,8 +815,8 @@ The Program freezes its feature set and memory plan at startup. The Qwen3.6 fami
 Text, MTP, DFlash, and Vision phase capacities from the configured finite execution domains. The one
 workspace preserves a general execution prefix while a Vision item output is live; before that
 output is produced, Vision encode may reuse the complete backing according to checked
-patch/position, attention, MLP, and merger lifetimes. The registered Frontend retains an aggregate
-prompt budget of `min(max_context,32768)` Vision tokens, while the sequential Vision tower and
+patch/position, attention, MLP, and merger lifetimes. The registered Frontend bounds a prompt's
+Vision tokens only by `max_context`, while the sequential Vision tower and
 `[2048,V]` handoff use the registered single-item bound `V<=min(max_context,16384)`. Multiple items
 reuse the same handoff after the previous scatter span is complete. DFlash target features and
 positions survive between target verification and proposal/context publication, so their prefill

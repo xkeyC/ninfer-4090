@@ -364,10 +364,14 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 OpenAI image and video sources may be HTTP(S) URLs or base64 data URLs.
 
 Text and media requests use one complete-prompt context contract. After chat-template rendering and
-media-token expansion, the result must fit Engine `--max-context`. The current Vision runtime also
-has a 32,768 merged-token envelope (131,072 raw patches); the effective Vision limit is therefore
-`min(--max-context, 32768)`. There is no fixed image/video item-count limit: item count is admitted
-through aggregate source-byte, decoded-pixel, raw-patch, Vision-token, and live-memory budgets.
+media-token expansion, the result must fit Engine `--max-context`. Vision tokens occupy context and
+KV exactly like text tokens, and there is no separate aggregate Vision-token budget or image/video
+item-count limit. The Vision tower encodes one item at a time in a workspace sized by
+`--vision-max-tokens`: an image or video whose native grid exceeds that item capacity is downsized,
+keeping its aspect ratio, until it fits. Video sampling is capped at two frames per item token.
+With `oversized_image` set to `error`, an image that would need such a downsize is rejected with
+`invalid_media` instead. Aggregate source bytes and live host memory remain the other request
+bounds.
 
 Media cache misses run as independent decode → resize → BF16-pack tasks on a bounded host worker
 pool. Prepared payloads are keyed by SHA-256 of the acquired bytes plus modality, so repeated media
@@ -376,7 +380,9 @@ single-flight build. `--media-cache-mib` bounds LRU-retained payloads, while
 `--media-live-mib` bounds every cache-, request-, or runtime-referenced payload. Cache eviction does
 not invalidate a request reference, and live bytes are returned only when the final reference is
 released. A request-level preparation gate derived from the live limit prevents concurrent partial
-builds from deadlocking the memory account.
+builds from deadlocking the memory account. The live limit must hold one prompt whose whole context
+is Vision payload (12 KiB per Vision token, about 3 GiB at 262,144 tokens), so a smaller
+`--media-live-mib` is raised to that size; it is an accounting bound, not a reservation.
 
 An expanded prompt beyond `--max-context` returns HTTP 400 `context_length_exceeded`, including
 the prepared token count and configured context ceiling. A media preprocessing resource rejection
@@ -819,7 +825,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--context-cost-presets FILE` | optional runtime context-cost preset registry | generic + compiled defaults |
 | `--max-request-mib N` | body-size limit before JSON parsing | `384` |
 | `--media-cache-mib N` | LRU-retained prepared BF16 media payloads; `0` disables retention | `1024` |
-| `--media-live-mib N` | all live prepared BF16 media payloads | `2048` |
+| `--media-live-mib N` | all live prepared BF16 media payloads; raised to hold one full-context Vision prompt | `2048` |
 | `--media-preprocess-threads N` | bounded media preprocessing workers; `0` selects at most 16 from host concurrency | `0` |
 | `--request-log-jsonl FILE` | append full-precision server/request records | disabled |
 | `--slot-save-path DIR` | enable `/slots/{id}?action=save\|restore\|erase` session persistence into DIR | disabled |
@@ -926,8 +932,8 @@ as full-precision JSON numbers. Its `speculative` object contains `backend`, `dr
 derived downstream from raw token counts and seconds instead of rounded stderr strings.
 
 For `server_start.memory`, `workspace.capacity_bytes` is the only physical workspace allocation.
-When Vision is enabled, `vision_workspace` reports the aggregate prompt and maximum-item token
-bounds plus encode peak and handoff layout/usage within that same allocation; these bytes must not
+When Vision is enabled, `vision_workspace` reports the aggregate prompt bound (the context) and the
+maximum-item token bound plus encode peak and handoff layout/usage within that same allocation; these bytes must not
 be added to `workspace.capacity_bytes`. The field is `null` when Vision is disabled.
 
 `request_done.engine_timing` separates FIFO `queue_wait_seconds`, blocking

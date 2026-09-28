@@ -22,9 +22,9 @@ struct FrontendOptions {
     std::size_t media_live_bytes           = kDefaultMediaLiveBytes;
     std::uint32_t media_preprocess_threads = 0;
     // Vision scratchpad token capacity, which bounds each media item (the tower encodes one item
-    // at a time). The aggregate prompt budget stays min(max_context, 32768). Zero keeps the
-    // registered single-item capacity; production paths normalize an unset value to 8192 in
-    // startup_features.h.
+    // at a time); larger media is downsized to fit. A prompt's Vision tokens are bounded only by
+    // max_context. Zero keeps the registered single-item capacity; production paths normalize an
+    // unset value to 8192 in startup_features.h.
     std::uint32_t vision_max_tokens = 0;
 };
 

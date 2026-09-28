@@ -276,8 +276,9 @@ workspace contains a general execution prefix and a fixed item-output handoff re
 may reuse the full backing before producing the output; Text/MTP/decode work remains inside the
 general prefix while the handoff is live. The capacity is therefore the maximum legal simultaneous
 extent, not the sum of Text, Vision scratch, and Vision output allocations. Text prefill uses
-`min(--prefill-chunk,--max-context)`; Vision keeps the existing 32,768-token aggregate prompt budget
-but plans Device execution for the registered 16,384-token maximum single item. Requests perform no
+`min(--prefill-chunk,--max-context)`; Vision tokens are bounded per prompt only by `--max-context`,
+and Device execution is planned for one item of at most `--vision-max-tokens` (registered maximum
+16,384), with larger media downsized to fit. Requests perform no
 project-owned device allocation or growth. Context-cache capacity controls are intentionally absent
 from this one-request interface; the persistent Engine and server routes own cross-request reuse and
 optional Host backing.

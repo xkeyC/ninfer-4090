@@ -906,14 +906,13 @@ public:
         if (options.max_context == 0) {
             throw std::invalid_argument("frontend max_context must be nonzero");
         }
-        const std::uint64_t vision_tokens =
-            std::min<std::uint64_t>(options.max_context, kMaximumPromptVisionTokens);
-        processor.max_vision_tokens = vision_tokens;
-        processor.max_raw_patches   = vision_tokens * kRawPatchesPerVisionToken;
+        // Vision tokens occupy context and KV exactly like text, so the only prompt-level Vision
+        // bound is the context itself.
+        processor.max_vision_tokens = options.max_context;
+        processor.max_raw_patches   = processor.max_vision_tokens * kRawPatchesPerVisionToken;
         // The Vision tower encodes one item at a time into a workspace sized to
-        // vision_max_tokens, so that cap bounds each item, not the prompt. Earlier images in a
-        // conversation stay within the aggregate budget above. Zero keeps the registered
-        // single-item capacity.
+        // vision_max_tokens, so that cap bounds each item, not the prompt; larger media is
+        // downsized to fit. Zero keeps the registered single-item capacity.
         std::uint64_t item_tokens = kMaximumVisionItemTokens;
         if (options.vision_max_tokens > 0) {
             item_tokens = std::min<std::uint64_t>(item_tokens, options.vision_max_tokens);
@@ -921,15 +920,15 @@ public:
         processor.max_item_vision_tokens = item_tokens;
         processor.max_item_raw_patches   = item_tokens * kRawPatchesPerVisionToken;
         if (vision_enabled) {
-            const std::uint64_t minimum_live =
+            // The live account is a host-memory bound, not a reservation: it must admit one prompt
+            // whose whole context is Vision payload, so it is raised to that size when needed.
+            const std::uint64_t maximum_request_live =
                 processor.max_raw_patches * kPreparedVisionPatchFeatures * sizeof(std::uint16_t);
-            if (minimum_live > options.media_live_bytes) {
-                throw std::invalid_argument(
-                    "media live-byte capacity cannot hold the maximum supported Vision prompt");
-            }
+            const std::size_t live_bytes = std::max<std::size_t>(
+                options.media_live_bytes, static_cast<std::size_t>(maximum_request_live));
             media_cache = std::make_shared<fi::MediaPreprocessCache>(
-                options.media_cache_bytes, options.media_live_bytes,
-                options.media_preprocess_threads, static_cast<std::size_t>(minimum_live));
+                options.media_cache_bytes, live_bytes, options.media_preprocess_threads,
+                static_cast<std::size_t>(maximum_request_live));
         }
         if (registered_checkpoint) {
             validate_registered_processor(processor);
